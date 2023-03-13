@@ -1,0 +1,616 @@
+---
+title: "Combine_whale_zoop"
+author: "Sarah Roberts"
+date: "2023-03-08"
+output: html_document
+---
+
+#libraries
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(sp)
+library(sf)
+library(spatialEco)
+library(rnaturalearth)
+library(olsrr)
+library(party)
+library(gridExtra)
+library(gjam)
+library(lessR)
+library(ggthemes)
+library(wesanderson)
+library(ggpubr)
+library(pROC)
+library(ggsci)
+library(gridExtra)
+library(cowplot)
+library(patchwork)
+library(lessR)
+library(ggcorrplot)
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+library(mapdata)
+library(maps)
+
+usa <- map_data('usa')
+
+remove_outliers <- function(df, cols = names(df)) {
+  for (col in cols) {
+    df <- df[!outliers(df[[col]]),]
+  }
+  df
+}
+
+sumna <- function(x){
+  #acts like sum(na.rm=T) but returns NA if all are NA
+  if(!all(is.na(x))) return(sum(x, na.rm=T))
+  if(all(is.na(x))) return(NA)
+}
+
+r2_general <-function(preds,actual){ 
+  return(1- sum((preds - actual) ^ 2)/sum((actual - mean(actual))^2))
+}
+
+RMSE_func <- function(preds, actual){
+  return(sqrt(mean((actual - preds)^2)))
+}
+
+theme_Publication <- function(base_size=12, base_family="Arial") {
+
+      (theme_foundation(base_size=base_size, base_family=base_family)
+       + theme(plot.title = element_text(face = "bold",
+                                         size = rel(1.2), hjust = 0.5),
+               text = element_text(),
+               panel.background = element_rect(colour = NA),
+               plot.background = element_rect(colour = NA),
+               panel.border = element_rect(colour = NA),
+               axis.title = element_text(face = "bold",size = rel(1)),
+               axis.title.y = element_text(angle=90,vjust =2),
+               axis.title.x = element_text(vjust = -0.2),
+               axis.text = element_text(), 
+               axis.line = element_line(colour="black"),
+               axis.ticks = element_line(),
+               panel.grid.major = element_line(colour="#f0f0f0"),
+               panel.grid.minor = element_blank(),
+               legend.key = element_rect(colour = NA),
+               legend.position = "bottom",
+               legend.direction = "horizontal",
+               legend.key.size= unit(0.5, "cm"),
+               legend.margin = unit(0, "cm"),
+               legend.title = element_text(face="italic"),
+               plot.margin=unit(c(10,5,5,5),"mm"),
+               strip.background=element_rect(colour="#f0f0f0",fill="#f0f0f0"),
+               strip.text = element_text(face="bold")
+          ))
+      
+}
+
+theme_Publication <- function(base_size=12, base_family="Arial") {
+
+      (theme_foundation(base_size=base_size, base_family=base_family)
+       + theme(plot.title = element_text(hjust = 0.5),
+               text = element_text(),
+               panel.background = element_rect(colour = NA),
+               plot.background = element_rect(colour = NA),
+               panel.border = element_rect(colour = NA),
+               axis.title = element_text(size = rel(1)),
+               axis.title.y = element_text(angle=90,vjust =2),
+               axis.title.x = element_text(vjust = -0.2),
+               axis.text = element_text(), 
+               axis.line = element_line(colour="black"),
+               axis.ticks = element_line(),
+               panel.grid.major = element_line(colour="#f0f0f0"),
+               panel.grid.minor = element_blank(),
+               legend.key = element_rect(colour = NA),
+               legend.position = "bottom",
+               legend.direction = "horizontal",
+               legend.key.size= unit(0.5, "cm"),
+               legend.margin = unit(0, "cm"),
+               legend.title = element_text(face="italic"),
+               plot.margin=unit(c(10,5,5,5),"mm"),
+               strip.background=element_rect(colour="#f0f0f0",fill="#f0f0f0")
+          ))
+      
+}
+
+pal <- wes_palette("Zissou1", 50, type = "continuous")
+
+'%!in%' <- function(x,y)!('%in%'(x,y))
+
+```
+
+This is reading in the text file I made from the survey shp file. You can also read in the shapefile and use those polygons (then calculate density per segment area)
+```{r}
+whale <- read.table("whale_data/baleen_segments.txt", header = TRUE)
+whale <- whale %>% dplyr::filter(ModelID == 28 | ModelID == 29) #Humpback and Fin
+```
+
+28 - Humpback
+29 - Fin 
+33 - Sei 
+
+Make the date column a date and separate out 
+
+```{r}
+whale$date <- as.Date(whale$StartTime, format = "%m/%d/%Y")
+whale <- whale %>% mutate(day = day(date), month = month(date), year = year(date))
+```
+
+```{r}
+
+
+ggplot(data = world) + geom_sf() +geom_point(data = subset(whale, whale$Individu_1 > 0), aes(x = X_mid, y = Y_mid, colour = as.factor(ModelID))) + facet_wrap(~year)+
+    coord_sf(xlim=c(-90, -50), ylim=c(30,50), expand = TRUE)
+
+ggplot(data = world) + geom_sf() +geom_point(data = subset(whale, whale$Individu_1 > 0), aes(x = X_mid, y = Y_mid, colour = as.factor(year))) + facet_wrap(~month)+
+    coord_sf(xlim=c(-90, -50), ylim=c(30,50), expand = TRUE)
+
+whale %>% filter(Individu_1 > 0) %>% ggplot(aes(x = month)) + geom_histogram(aes(group = as.factor(ModelID), fill = as.factor(ModelID)), position = "dodge") + facet_wrap(~year)
+```
+
+#ecomon data 
+load in the data 
+```{r}
+ecomon <- read.csv("ecomon_data/EcoMon_Plankton_Data_v3_7-Data.csv")
+```
+
+
+First lets look at the structure of the data and convert date to a date column
+```{r}
+str(ecomon)
+
+#convert data and create year, month, day columns: 
+
+ecomon$date <- as.Date(ecomon$date, format =  "%d-%b-%y") #b here is the code for month when its words lol
+ecomon <- ecomon %>% mutate(day = day(date), month = month(date), year = year(date))
+ecomon$haulid <- paste(ecomon$cruise_name, "_", ecomon$station, "_", ecomon$depth)
+```
+
+
+#overlap grid 
+first lets try out a simple grid of overlapping points (need to think about the different data structures, but for now lets forge ahead)
+```{r}
+# make an object the size and shape of the output you want
+globe_bb <- matrix(c(-84,  20,
+                      -84,  50,
+                      -52, 50,
+                     -52, 20,
+                     -84,  20), byrow = TRUE, ncol = 2) %>%
+  list() %>% 
+  st_polygon() %>% 
+  st_sfc(., crs = 4326)
+
+#checkit
+ggplot(data = world) + geom_sf() +geom_sf(data = globe_bb) + geom_point(data = whale, aes(x = X_mid, y = Y_mid)) + geom_point(data = ecomon, aes(x = lon, y = lat), colour = "red") + 
+    coord_sf(xlim=c(-90, -20), ylim=c(20,60), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+# generate grid of 128 x 128 tiles (each .5 x .5 degrees)
+globe_grid_18x18 <- st_make_grid(globe_bb, n = c(64, 64), 
+                                 crs = 4326, what = 'polygons') %>%
+  st_sf('geometry' = ., data.frame('ID' = 1:length(.)))
+
+#checkit
+ggplot(data = world) + geom_sf() +geom_sf(data = globe_grid_18x18) +
+    coord_sf(xlim=c(-90, -50), ylim=c(20,60), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+zoop_table <- ecomon
+
+#now sample grid ID for zoop table and whale table 
+zoop_spat <- ecomon
+
+
+coordinates(zoop_spat) <- ~ lon + lat
+zoop_spat <- st_as_sf(zoop_spat)
+
+zoop_spat <- st_set_crs(zoop_spat, 4326)
+grid <- globe_grid_18x18
+
+
+zoop_extract <- point.in.poly(zoop_spat, grid)
+zoop_extract_2 <- as.data.frame(zoop_extract)
+
+
+whale_spat <- whale
+
+
+coordinates(whale_spat) <- ~ X_mid + Y_mid
+whale_spat <- st_as_sf(whale_spat)
+whale_spat <- st_set_crs(whale_spat, 4326)
+grid <- globe_grid_18x18
+
+
+whale_extract <- point.in.poly(whale_spat, grid)
+whale_extract_2 <- as.data.frame(whale_extract)
+
+
+
+#change to grid id 
+whale_extract_2$gridID <- whale_extract_2$ID
+zoop_extract_2$gridID <- zoop_extract_2$ID
+
+
+
+#group to get rid of duplicates (there are times when a point is overlapping two grid cells)
+#group by 
+zoop_extract_2_2 <- zoop_extract_2[!duplicated(zoop_extract_2[c("haulid", "coords.x1","coords.x2")]),] 
+
+whale_extract_2_2 <- whale_extract_2[!duplicated(whale_extract_2[c("ID.x", "coords.x1","coords.x2")]),] 
+
+zoop_extract_2_2 <- zoop_extract_2_2 %>% group_by(year, month, gridID) %>% dplyr::summarise_if(is.numeric, mean, na.rm = TRUE)
+
+zoop_extract_2_2[zoop_extract_2_2 == "NaN"] = NA
+
+whale_extract_2_2 <- whale_extract_2_2 %>% group_by(ModelID, year, month, ID.y) %>% dplyr::summarise(Individu_1 = sum(Individu_1), length = sum(SegmentLen), coords.x1 = mean(coords.x1), coords.x2 = mean(coords.x2), month = mean(month))
+  
+#need to take the sum of Individu_1 and sum of survey lengths to get a new abd per km 
+whale_extract_2_2$AbdPerArea <- whale_extract_2_2$Individu_1/whale_extract_2_2$length
+  
+
+
+both <- left_join(whale_extract_2_2, zoop_extract_2_2, by = c("year" = "year", "month" = "month", "ID.y" = "gridID"))
+
+
+
+both <- both %>% filter(ammspp_10m2 >-1)
+
+#add distance to shore (to separate ecotypes later on)
+both_spat <- both
+coordinates(both_spat) <- ~ coords.x1.x + coords.x2.x
+proj4string(both_spat) <- CRS("+init=epsg:4326")
+both_spat <- spTransform(both_spat, "+proj=utm +zone=19 +ellps=GRS80 +datum=NAD83 +units=m +no_defs")
+library(rgeos)
+
+countries <- as_Spatial(world)
+proj4string(countries) <- CRS("+init=epsg:4326")
+
+
+
+
+countries_sub <- subset(countries, countries@data[["subregion"]] == "Northern America")
+countries_sub <- spTransform(countries_sub, "+proj=utm +zone=19 +ellps=GRS80 +datum=NAD83 +units=m +no_defs")
+
+plot(both_spat, col = "red")
+plot(countries_sub, add = T)
+
+both$dist_to_shore <- apply(gDistance(both_spat, countries_sub,byid=TRUE),2,min)
+both$dist_to_shore <- both$dist_to_shore/1000
+
+write.csv(both, "whales_and_zoop_monthly.csv")
+
+```
+
+#correlations 
+find out which fish are correlated with the whales 
+
+```{r}
+both <- both %>% pivot_wider(names_from = ModelID, values_from = AbdPerArea)
+both <- both %>% dplyr::rename("Humpback" = "28", "Fin" = "29")
+
+
+humpback <- both %>% dplyr::filter(!is.na(Humpback)) %>% select(-Fin)
+
+fin <- both %>% dplyr::filter(!is.na(Fin))  %>% select(-Humpback)
+
+both_subset1 <- humpback %>% select_if(is.numeric) %>% drop_na() 
+ycor <- cor(both_subset1, method = "spearman")
+ycor <-  as.data.frame(ycor) 
+rownames(ycor) <- colnames(ycor)
+
+ycor <- ycor %>% select(Humpback)
+ycor$cor <- rownames(ycor)
+ycor %>% arrange(-Humpback)
+```
+
+
+It looks like the top ones are pseudo_10m2, myoaen_10m2,calfin_10m2, acarlong_10m2, and mlucens_10m2
+
+those are Pseudocalanus (copepod), Myoxocephalus aenaeus (scuplin), Calanus finmarchicus (copepod), Acartia longiremis (copepod) and Metridia lucens (copepod)
+
+The literature says they feed on capelin (Mallotus villosus), herring (Clupea harengus), sand lance (Ammodytes spp.), and krill (Meganyctiphanes norvegica) https://onlinelibrary-wiley-com.libproxy.lib.unc.edu/doi/10.1111/gcb.16225
+Problem is the zoop data is fish larvae, not the actual fish which is what humpbacks feed on in addition to plankton 
+
+
+
+Lets take a look at the overlap of those copepods and humpbacks 
+
+##hump eda
+```{r}
+specs <- c("pseudo_10m2", "myoaen_10m2","calfin_10m2", "acarlong_10m2", "mlucens_10m2", "cluhar_10m2", "ammspp_10m2", "megan_10m2", "euph_10m2")
+specs1 <- c("pseu_copepod", "scuplin", "calanus", "arc_copepod", "mlcu_copepod", "herring", "sand_lance", "meg_krill", "euph_krill")
+
+humpback <- humpback %>% mutate(pseu_copepod = pseudo_10m2, scuplin = myoaen_10m2, calanus = calfin_10m2, arc_copepod = acarlong_10m2, mlcu_copepod =  mlucens_10m2, herring = cluhar_10m2, sand_lance = ammspp_10m2, meg_krill = megan_10m2, euph_krill = euph_10m2)
+
+dat <- humpback %>% pivot_longer(cols = specs1, names_to = "zoop", values_to = "zoop_m2")
+
+
+dat <- dat[colnames(dat) %in% c("Humpback", "zoop", "zoop_m2", "coords.x1.x", "coords.x2.x", "month", "year")]
+
+for (i in 1:length(specs1)){
+  use <- specs1[i]
+  dat1 <- dat %>% dplyr::filter(zoop == use)
+  dat1 <- dat1 %>% dplyr::filter(zoop_m2 >0 & Humpback > 0 )
+print(ggplot(data = world) + geom_sf() + geom_point(data = dat1, aes(x = coords.x1.x, y = coords.x2.x), size = .4) +
+    coord_sf(xlim=c(-78, -62), ylim=c(35,45), expand = TRUE)  + facet_wrap(~month) + ggtitle(label = paste(use, nrow(dat1))))
+}
+
+
+for (i in 1:length(specs1)){
+  use <- specs1[i]
+  dat1 <- dat %>% dplyr::filter(zoop == use)
+  dat1 <- dat1 %>% dplyr::filter(zoop_m2 >0 & Humpback > 0 )
+print(ggplot(data = world) + geom_sf() + geom_point(data = dat1, aes(x = coords.x1.x, y = coords.x2.x), size = .4) +
+    coord_sf(xlim=c(-78, -62), ylim=c(35,45), expand = TRUE)  + facet_wrap(~year) + ggtitle(label = paste(use, nrow(dat1))))
+}
+```
+```{r}
+for (i in 1:length(specs1)){
+  use <- specs1[i]
+  dat1 <- dat %>% dplyr::filter(zoop == use)
+  dat1 <- dat1 %>% dplyr::filter(zoop_m2 >0 & Humpback > 0 )
+print(ggplot(data = dat1) + geom_histogram(aes(x = month)) + facet_wrap(~year) + ggtitle(label = paste(use, nrow(dat1))))
+}
+```
+
+
+##fin eda
+Same thing with fin whales 
+
+```{R}
+both_subset1 <- fin %>% select_if(is.numeric) %>% drop_na() 
+ycor <- cor(both_subset1, method = "spearman")
+ycor <-  as.data.frame(ycor) 
+rownames(ycor) <- colnames(ycor)
+
+ycor <- ycor %>% select(Fin)
+ycor$cor <- rownames(ycor)
+ycor %>% arrange(-Fin)
+```
+
+
+It looks like the top ones are calfin_10m2, mlucens_10m2, pseudo_10m2, myoaen_10m2,calfin_10m2, acarlong_10m2, and mlucens_10m2, sebspp_100m3, euph_10m2
+
+those are Pseudocalanus (copepod), Myoxocephalus aenaeus (scuplin), Calanus finmarchicus (copepod), Acartia longiremis (copepod) and Metridia lucens (copepod)
+
+The literature says they feed on capelin (Mallotus villosus), herring (Clupea harengus), sand lance (Ammodytes spp.), and krill (Meganyctiphanes norvegica) https://onlinelibrary-wiley-com.libproxy.lib.unc.edu/doi/10.1111/gcb.16225
+Problem is the zoop data is fish larvae, not the actual fish which is what humpbacks feed on in addition to plankton 
+
+
+
+Lets take a look at the overlap of those copepods and humpbacks 
+
+
+```{r}
+specs <- c("pseudo_10m2", "myoaen_10m2","calfin_10m2", "acarlong_10m2", "mlucens_10m2", "cluhar_10m2", "ammspp_10m2", "megan_10m2", "euph_10m2")
+specs1 <- c("pseu_copepod", "scuplin", "calanus", "arc_copepod", "mlcu_copepod", "herring", "sand_lance", "meg_krill", "euph_krill")
+
+fin <- fin %>% mutate(pseu_copepod = pseudo_10m2, scuplin = myoaen_10m2, calanus = calfin_10m2, arc_copepod = acarlong_10m2, mlcu_copepod =  mlucens_10m2, herring = cluhar_10m2, sand_lance = ammspp_10m2, meg_krill = megan_10m2, euph_krill = euph_10m2)
+
+dat <- fin %>% pivot_longer(cols = specs1, names_to = "zoop", values_to = "zoop_m2")
+
+
+dat <- dat[colnames(dat) %in% c("Fin", "zoop", "zoop_m2", "coords.x1.x", "coords.x2.x", "month", "year")]
+
+for (i in 1:length(specs1)){
+  use <- specs1[i]
+  dat1 <- dat %>% dplyr::filter(zoop == use)
+  dat1 <- dat1 %>% dplyr::filter(zoop_m2 >0 & Fin > 0 )
+print(ggplot(data = world) + geom_sf() + geom_point(data = dat1, aes(x = coords.x1.x, y = coords.x2.x), size = .4) +
+    coord_sf(xlim=c(-78, -62), ylim=c(35,45), expand = TRUE)  + facet_wrap(~month) + ggtitle(label = paste(use, nrow(dat1))))
+}
+
+
+for (i in 1:length(specs1)){
+  use <- specs1[i]
+  dat1 <- dat %>% dplyr::filter(zoop == use)
+  dat1 <- dat1 %>% dplyr::filter(zoop_m2 >0 & Fin > 0 )
+print(ggplot(data = world) + geom_sf() + geom_point(data = dat1, aes(x = coords.x1.x, y = coords.x2.x), size = .4) +
+    coord_sf(xlim=c(-78, -62), ylim=c(35,45), expand = TRUE)  + facet_wrap(~year) + ggtitle(label = paste(use, nrow(dat1))))
+}
+```
+```{r}
+for (i in 1:length(specs1)){
+  use <- specs1[i]
+  dat1 <- dat %>% dplyr::filter(zoop == use)
+  dat1 <- dat1 %>% dplyr::filter(zoop_m2 >0 & Fin > 0 )
+print(ggplot(data = dat1) + geom_histogram(aes(x = month)) + facet_wrap(~year) + ggtitle(label = paste(use, nrow(dat1))))
+}
+```
+
+#Questions
+1 Who are humpbacks and fin associated with? 
+  Are their distributions explained by zoops? 
+2 Has association changed over time? 
+  Start with highly co-occuring species (maybe 20 or 50)
+  Run gjam to get out environmental covariance or co-occurence or deviance explained 
+  look at dendrograms over time (maybe start with just the summer)
+3 Has phenology changed? 
+  Are they switching between prey because the prey have moved out of the area earlier? 
+4 is there diet overlap? Niche specificity? 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#Fish
+do we have any sand lance, herring, capelin info in the trawls? 
+
+```{r}
+load("NEFSC_BTS_2021_all_seasons.RData")
+load("stratum.area.RData")
+fish_table <- survey$survdat
+#this is monthly cpue (wtcpue)
+
+# sum different sexes of same spp together
+#okay so now we know that the biomass column was given to them as the calibrated cpue
+fish_table <- fish_table %>% 
+  group_by(YEAR, SEASON, EST_TOWDATE, LAT, LON, CRUISE6, DEPTH, STATION, STRATUM, SVSPP, COMNAME) %>% 
+  dplyr::summarise(wtcpue = sum(BIOMASS), abd = sum(ABUNDANCE), BOTTEMP = mean(BOTTEMP), BOTSALIN = mean(BOTSALIN), SURFTEMP = mean(SURFTEMP), SURFSALIN = mean(SURFSALIN)) 
+
+neus_strata <- stratum.area %>% 
+  dplyr::select(STRATUM, STRATUM_AREA) %>% 
+  mutate(STRATUM = as.integer(STRATUM)) %>%
+  distinct()
+
+fish_table <-  left_join(fish_table, neus_strata, by = c("STRATUM" = "STRATUM"))
+
+fish_table <- filter(fish_table, !is.na(STRATUM_AREA))
+
+fish_table <- fish_table %>%
+  mutate(
+    # Create a unique haulid
+    haulid = paste(formatC(CRUISE6, width=6, flag=0), formatC(STATION, width=3, flag=0), formatC(STRATUM, width=4, flag=0), sep='-'),  
+    # Calculate stratum area where needed (use convex hull approach)
+    # convert square nautical miles to square kilometers
+    STRATUM_AREA = STRATUM_AREA * 3.429904) %>% 
+  dplyr::rename(year = YEAR,
+         spp = COMNAME,
+         date = EST_TOWDATE,
+         lat = LAT, 
+         lon = LON, 
+         depth = DEPTH,
+         stratum = STRATUM, 
+         stratumarea = STRATUM_AREA) %>%
+  filter(
+    # remove unidentified spp and non-species
+    spp != "" | !is.na(spp), 
+    !grepl("EGG", spp), 
+    !grepl("UNIDENTIFIED", spp)) %>%
+  group_by(haulid, stratum, stratumarea, year, date, lat, lon, depth, spp, SEASON) %>% 
+  dplyr::summarise(wtcpue = sumna(wtcpue), BT = mean(BOTTEMP), BSAL = mean(BOTSALIN), SST = mean(SURFTEMP), SSAL = mean(SURFSALIN)) %>% 
+  # add temporary region column (this will be replaced with seasonal name)
+  mutate(region = "Northeast US") %>% 
+  dplyr::select(region, haulid, year, date, lat, lon, stratum, stratumarea, depth, spp, wtcpue, SEASON, BT, SST, BSAL, SSAL) %>% 
+  ungroup()
+
+
+fish_table <- fish_table %>% 
+  drop_na(lat,lon)
+
+fish_table$month <- month(as.POSIXlt(fish_table$date))
+
+
+fish_table_wide <- pivot_wider(fish_table, names_from = spp, values_from = wtcpue)
+ #with more than 20% NA
+
+fish_table <- fish_table_wide
+
+#convert NA to 0 
+fish_table[, 15:ncol(fish_table)][is.na(fish_table[, 15:ncol(fish_table)])] <- 0
+
+colnames(fish_table) <- gsub(pattern = ' ', replacement = ".", x = colnames(fish_table))
+fish_table <- fish_table %>% dplyr::select(-SEASON)
+
+
+fish_test <- fish_table %>% 
+  drop_na(lat,lon)
+
+fish_table <- fish_test
+
+#now sample grid ID for fish table and dolphin table 
+fish_spat <- fish_test
+
+
+coordinates(fish_spat) <- ~ lon + lat
+fish_spat <- st_as_sf(fish_spat)
+
+fish_spat <- st_set_crs(fish_spat, 4326)
+grid <- globe_grid_18x18
+
+
+fish_extract <- point.in.poly(fish_spat, grid)
+fish_extract_2 <- as.data.frame(fish_extract)
+
+
+
+fish_extract_2$gridID <- fish_extract_2$ID
+
+
+
+#group to get rid of duplicates (there are times when a point is overlapping two grid cells)
+#group by 
+fish_extract_2_2 <- fish_extract_2[!duplicated(fish_extract_2[c("haulid", "coords.x1","coords.x2")]),] 
+
+fish_extract_2_2 <- fish_extract_2_2 %>% group_by(year, month, gridID) %>% dplyr::summarise_if(is.numeric, mean, na.rm = TRUE)
+
+fish_extract_2_2[fish_extract_2_2 == "NaN"] = NA
+
+both_fish <- left_join(whale_extract_2_2, fish_extract_2_2, by = c("year" = "year", "month" = "month", "ID.y" = "gridID"))
+
+
+both_fish <- both_fish %>% filter(ATLANTIC.CROAKER >-1)
+both_fish <- both_fish %>% ungroup() %>% drop_na(SST,SSAL, depth)
+
+#add distance to shore (to separate ecotypes later on)
+both_spat <- both_fish
+coordinates(both_spat) <- ~ coords.x1.x + coords.x2.x
+proj4string(both_spat) <- CRS("+init=epsg:4326")
+both_spat <- spTransform(both_spat, "+proj=utm +zone=19 +ellps=GRS80 +datum=NAD83 +units=m +no_defs")
+library(rgeos)
+
+countries <- as_Spatial(world)
+proj4string(countries) <- CRS("+init=epsg:4326")
+
+
+
+
+countries_sub <- subset(countries, countries@data[["subregion"]] == "Northern America")
+countries_sub <- spTransform(countries_sub, "+proj=utm +zone=19 +ellps=GRS80 +datum=NAD83 +units=m +no_defs")
+
+plot(both_spat, col = "red")
+plot(countries_sub, add = T)
+
+both_fish$dist_to_shore <- apply(gDistance(both_spat, countries_sub,byid=TRUE),2,min)
+both_fish$dist_to_shore <- both_fish$dist_to_shore/1000
+
+write.csv(both_fish, "both_fish.csv")
+
+```
+
+#correlations 
+find out which fish are correlated with the whales 
+
+```{r}
+both_subset1 <- both_fish %>%select_if(is.numeric) %>% drop_na() 
+ycor <- cor(both_subset1, method = "spearman")
+ycor <-  as.data.frame(ycor) 
+rownames(ycor) <- colnames(ycor)
+
+ycor <- ycor %>% select(AbdPerArea)
+ycor$cor <- rownames(ycor)
+ycor %>% arrange(-AbdPerArea)
+```
+haddock, herring, cod, mackerel, sculpin, plaice 
+
+```{r}
+
+specs1 <- c("HADDOCK", "ATLANTIC.HERRING", "ATLANTIC.COD", "ATLANTIC.MACKEREL", "LONGHORN.SCULPIN", "AMERICAN.PLAICE", "NORTHERN.SAND.LANCE")
+
+dat <- both_fish %>% pivot_longer(cols = specs1, names_to = "fish", values_to = "fish_abd")
+
+
+dat <- dat[colnames(dat) %in% c("AbdPerArea", "fish", "fish_abd", "coords.x1.x", "coords.x2.x", "month")]
+
+for (i in 1:length(specs1)){
+  use <- specs1[i]
+  dat1 <- dat %>% dplyr::filter(fish == use)
+  dat1 <- dat1 %>% dplyr::filter(fish_abd >0 & AbdPerArea > 0 )
+print(ggplot(data = world) + geom_sf() + geom_point(data = dat1, aes(x = coords.x1.x, y = coords.x2.x), size = .4) +
+    coord_sf(xlim=c(-78, -62), ylim=c(35,45), expand = TRUE)  + facet_wrap(~month) + ggtitle(label = paste(use, nrow(dat1))))
+}
+```
+
+it looks like they don't overlap with american sand lance or northern sand lance but that is because those two species are not erally captured in the trawls. 
+I think the only usable one here is herring - the problem is the timing of the surveys - don't include summer and summer is when they are feeding in the gulf of main. Lets stick to zoop data for now 
