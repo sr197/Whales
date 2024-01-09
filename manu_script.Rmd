@@ -1,0 +1,2963 @@
+---
+title: "manu_script"
+author: "Sarah Roberts"
+date: "2023-05-31"
+output: html_document
+---
+
+#libraries
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(lubridate)
+library(ggpmisc)
+
+library(sp)
+library(sf)
+library(spatialEco)
+library(rnaturalearth)
+library(olsrr)
+library(party)
+library(gridExtra)
+library(gjam)
+library(lessR)
+library(ggthemes)
+library(wesanderson)
+library(ggpubr)
+library(pROC)
+library(ggsci)
+library(gridExtra)
+library(cowplot)
+library(patchwork)
+library(lessR)
+library(ggcorrplot)
+library(tidytext)
+library(geosphere)
+library(mgcv)
+library(fitdistrplus)
+library(units)
+
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+library(mapdata)
+library(maps)
+
+usa <- map_data('usa')
+
+remove_outliers <- function(df, cols = names(df)) {
+  for (col in cols) {
+    df <- df[!outliers(df[[col]]),]
+  }
+  df
+}
+
+sumna <- function(x){
+  #acts like sum(na.rm=T) but returns NA if all are NA
+  if(!all(is.na(x))) return(sum(x, na.rm=T))
+  if(all(is.na(x))) return(NA)
+}
+
+r2_general <-function(preds,actual){ 
+  return(1- sum((preds - actual) ^ 2)/sum((actual - mean(actual))^2))
+}
+
+RMSE_func <- function(preds, actual){
+  return(sqrt(mean((actual - preds)^2)))
+}
+
+theme_Publication <- function(base_size=12, base_family="Arial") {
+
+      (theme_foundation(base_size=base_size, base_family=base_family)
+       + theme(plot.title = element_text(face = "bold",
+                                         size = rel(1.2), hjust = 0.5),
+               text = element_text(),
+               panel.background = element_rect(colour = NA),
+               plot.background = element_rect(colour = NA),
+               panel.border = element_rect(colour = NA),
+               axis.title = element_text(face = "bold",size = rel(1)),
+               axis.title.y = element_text(angle=90,vjust =2),
+               axis.title.x = element_text(vjust = -0.2),
+               axis.text = element_text(), 
+               axis.line = element_line(colour="black"),
+               axis.ticks = element_line(),
+               panel.grid.major = element_line(colour="#f0f0f0"),
+               panel.grid.minor = element_blank(),
+               legend.key = element_rect(colour = NA),
+               legend.position = "bottom",
+               legend.direction = "horizontal",
+               legend.key.size= unit(0.5, "cm"),
+               legend.margin = unit(0, "cm"),
+               legend.title = element_text(face="italic"),
+               plot.margin=unit(c(10,5,5,5),"mm"),
+               strip.background=element_rect(colour="#f0f0f0",fill="#f0f0f0"),
+               strip.text = element_text(face="bold")
+          ))
+      
+}
+
+select <- dplyr::select
+rename <- dplyr::rename
+
+sf_use_s2(FALSE) #<- this avoids issues with st_intersection
+```
+
+#load and clean data 
+##ecomon data 
+load in the data 
+```{r}
+stratum <- read_sf("whale_data/EcomonStrata_v4b.shp")
+stratum <- st_set_crs(stratum, 4326)
+ecomon <- read.csv("ecomon_data/EcoMon_Plankton_Data_v3_7-Data.csv")
+ecomon_x <- ecomon[c(1:13)]
+ecomon_snames <- colnames(ecomon)
+ecomon_snames <- ecomon_snames[grepl("_10m2", ecomon_snames)]
+
+ecomon_y <- ecomon[colnames(ecomon) %in% ecomon_snames]
+ecomon_y[is.na(ecomon_y)] <- 0 #NAs should be true 0s
+
+#convert data and create year, month, day columns:
+ecomon <- cbind(ecomon_x, ecomon_y)
+
+ecomon$date <- as.Date(ecomon$date, format =  "%d-%b-%y") #b here is the code for month when its words lol
+ecomon <- ecomon %>% mutate(day = day(date), month = month(date), year = year(date), week = week(date))
+ecomon$haulid <- paste(ecomon$cruise_name, "_", ecomon$station, "_", ecomon$depth)
+
+
+
+
+
+#now sample grid ID for ecomon table and whale table 
+ecomon_spat <- ecomon
+
+
+coordinates(ecomon_spat) <- ~ lon + lat
+ecomon_spat <- st_as_sf(ecomon_spat)
+
+ecomon_spat <- st_set_crs(ecomon_spat, 4326)
+
+#clip to stratum
+ecomon_spat <- st_intersection(ecomon_spat,stratum)
+
+#ecomon_extract <- st_join(ecomon_spat, stratum, join = st_nearest_feature)
+
+#checkit 
+ggplot()  + geom_sf(data = world) +geom_sf(data = ecomon_spat, aes(colour = as.factor(Region))) +
+    coord_sf(xlim=c(-90, -50), ylim=c(30,50), expand = TRUE)
+```
+
+##Stomach content  
+```{r}
+load("~/Documents/whales/Whales/ammo21.rdata")
+stom <- ammo21 %>% filter(!analcat %in% c("EMPTY", "(Other)", "OTHFIS", "AR"))
+#EUPFAM, CLUFAM, CTENOP, COPEPO, AMPHIP, CNIDAR, ENGFAM, CUMACE
+
+stom$haulid <- paste(formatC(stom$cruise6, width=6, flag=0), formatC(stom$station, width=3, flag=0), formatC(stom$stratum, width=4, flag=0), sep='-')
+
+stom$declon <- stom$declon*-1
+
+stom <- stom %>% dplyr::select(haulid, analcat, analsci, collsci, declat, declon, month, day, year, pyamtw, pynam, pdscinam) %>% drop_na()
+
+
+#now sample grid ID for ecomon table and whale table 
+stom_spat <- stom
+
+
+coordinates(stom_spat) <- ~ declon + declat
+stom_spat <- st_as_sf(stom_spat)
+
+stom_spat <- st_set_crs(stom_spat, 4326)
+
+stom_spat <- st_intersection(stom_spat,stratum)
+#stom_extract <- st_join(stom_spat, stratum, join = st_nearest_feature)
+
+ggplot()  + geom_sf(data = world)  + geom_sf(data = stom_spat, aes(colour = as.factor(Region))) +
+    coord_sf(xlim=c(-90, -50), ylim=c(30,50), expand = TRUE)
+```
+##Trawls
+
+
+
+```{r}
+load("NEFSC_BTS_2021_all_seasons.RData")
+load("stratum.area.RData")
+fish_table <- survey$survdat
+#this is monthly cpue (wtcpue)
+
+# sum different sexes of same spp together
+#okay so now we know that the biomass column was given to them as the calibrated cpue
+fish_table <- fish_table %>% 
+  group_by(YEAR, SEASON, EST_TOWDATE, LAT, LON, CRUISE6, DEPTH, STATION, STRATUM, SVSPP, COMNAME) %>% 
+  dplyr::summarise(wtcpue = sum(BIOMASS), abd = sum(ABUNDANCE), BOTTEMP = mean(BOTTEMP), BOTSALIN = mean(BOTSALIN), SURFTEMP = mean(SURFTEMP), SURFSALIN = mean(SURFSALIN)) 
+
+neus_strata <- stratum.area %>% 
+  dplyr::select(STRATUM, STRATUM_AREA) %>% 
+  mutate(STRATUM = as.integer(STRATUM)) %>%
+  distinct()
+
+fish_table <-  left_join(fish_table, neus_strata, by = c("STRATUM" = "STRATUM"))
+
+fish_table <- filter(fish_table, !is.na(STRATUM_AREA))
+
+fish_table <- fish_table %>%
+  mutate(
+    # Create a unique haulid
+    haulid = paste(formatC(CRUISE6, width=6, flag=0), formatC(STATION, width=3, flag=0), formatC(STRATUM, width=4, flag=0), sep='-'),  
+    # Calculate stratum area where needed (use convex hull approach)
+    # convert square nautical miles to square kilometers
+    STRATUM_AREA = STRATUM_AREA * 3.429904) %>% 
+  dplyr::rename(year = YEAR,
+         spp = COMNAME,
+         date = EST_TOWDATE,
+         lat = LAT, 
+         lon = LON, 
+         depth = DEPTH,
+         stratum = STRATUM, 
+         stratumarea = STRATUM_AREA) %>%
+  filter(
+    # remove unidentified spp and non-species
+    spp != "" | !is.na(spp), 
+    !grepl("EGG", spp), 
+    !grepl("UNIDENTIFIED", spp)) %>%
+  group_by(haulid, stratum, stratumarea, year, date, lat, lon, depth, spp, SEASON) %>% 
+  dplyr::summarise(wtcpue = sumna(wtcpue), BT = mean(BOTTEMP), BSAL = mean(BOTSALIN), SST = mean(SURFTEMP), SSAL = mean(SURFSALIN)) %>% 
+  # add temporary region column (this will be replaced with seasonal name)
+  mutate(region = "Northeast US") %>% 
+  dplyr::select(region, haulid, year, date, lat, lon, stratum, stratumarea, depth, spp, wtcpue, SEASON, BT, SST, BSAL, SSAL) %>% 
+  ungroup()
+
+
+fish_table <- fish_table %>% 
+  drop_na(lat,lon)
+
+fish_table$month <- month(as.POSIXlt(fish_table$date))
+
+
+fish_table_wide <- pivot_wider(fish_table, names_from = spp, values_from = wtcpue)
+ #with more than 20% NA
+
+fish_table <- fish_table_wide
+
+#convert NA to 0 
+fish_table[, 15:ncol(fish_table)][is.na(fish_table[, 15:ncol(fish_table)])] <- 0
+
+colnames(fish_table) <- gsub(pattern = ' ', replacement = ".", x = colnames(fish_table))
+fish_table <- fish_table %>% dplyr::select(-SEASON)
+
+
+fish_table <- fish_table %>% 
+  drop_na(lat,lon)
+
+
+fish_spat <- fish_table
+
+
+coordinates(fish_spat) <- ~ lon + lat
+fish_spat <- st_as_sf(fish_spat)
+
+fish_spat <- st_set_crs(fish_spat, 4326)
+
+
+#clip to grid
+fish_spat <- st_intersection(fish_spat,stratum) #the stratum are consistently sampled, so I think I need to calculate a stratum level mean centroid 
+fish_spat <- fish_spat %>% mutate(gridID = Name)
+
+```
+
+##whales
+```{r}
+whale <- read.table("whale_data/baleen_segments.txt", header = TRUE)
+whale <- whale %>% dplyr::filter(ModelID == 28) #humpback 
+
+whale$date <- as.Date(whale$StartTime, format = "%m/%d/%Y")
+whale <- whale %>% mutate(day = day(date), month = month(date), year = year(date), week = week(date))
+
+
+#now sample grid ID for whale table and whale table 
+
+
+whale_survey <- readxl::read_xlsx("whale_data/survey_data.xlsx")
+whale_big <- left_join(whale, whale_survey, by = c("SurveyID" = "ID"))
+
+whale_spat <- whale_big
+
+coordinates(whale_spat) <- ~ X_mid + Y_mid
+whale_spat <- st_as_sf(whale_spat)
+
+whale_spat <- st_set_crs(whale_spat, 4326)
+
+ggplot()  + geom_sf(data = world)  + geom_sf(data = whale_spat, aes(colour = as.factor(Provider)), size = .2, alpha = .5) +
+    coord_sf(xlim=c(-80, -60), ylim=c(35,50), expand = TRUE)+
+    theme(legend.position="bottom")+ guides(colour = guide_legend(override.aes = list(size=4), nrow = 2))
+
+whale_spat <- whale
+
+coordinates(whale_spat) <- ~ X_mid + Y_mid
+whale_spat <- st_as_sf(whale_spat)
+
+whale_spat <- st_set_crs(whale_spat, 4326)
+
+whale_spat <- st_intersection(whale_spat,stratum)
+#whale_extract <- st_join(whale_spat, stratum, join = st_nearest_feature)
+
+ggplot()  + geom_sf(data = world)  + geom_sf(data = whale_spat, aes(colour = as.factor(Region))) +
+    coord_sf(xlim=c(-80, -60), ylim=c(35,50), expand = TRUE)+
+    theme(legend.position="bottom")
+```
+
+#index of abundance
+Start by calculating annual and seasonal indices of abundance for humpbacks as well as their prey 
+
+whales per km area surveyed 
+
+##annual - species level 
+summarize prey at the species level 
+```{r}
+#whale
+whale_an <- whale_spat %>% st_drop_geometry() %>% drop_na() %>% group_by(Region, year) %>% summarise(Individu_1 = sum(Individu_1), length = sum(SegmentAre)) 
+
+whale_an <- whale_an %>% drop_na() %>% group_by(Region, year) %>% summarise(AbdPerArea = Individu_1/length) 
+
+
+#stomach - total species specific prey weight/total predator stomachs
+  #need to add in a column for unique predators 
+
+
+stom_an <- stom_spat %>% st_drop_geometry() %>% drop_na() 
+stom_an$pynam <- gsub(pattern = ' ', replacement = "_", stom_an$pynam)
+
+stom_an$category <- paste(stom_an$pynam, "stomach", sep = "_")
+
+
+stom_an <- stom_an %>%mutate(pdcount = 1) %>% group_by(Region, year, category) %>% summarise(pyamtw = sum(pyamtw)/sum(pdcount)) %>% ungroup() #this is how you deal with more predators meaning there may be more prey represented 
+
+  #get rid of empty strings
+stom_an <- stom_an[!apply(stom_an, 1, function(x) any(x=="")),] 
+
+stom_an <- stom_an %>% ungroup()%>%  pivot_wider(names_from = category, values_from = pyamtw)
+
+stom_an <- stom_an[ , colSums(is.na(stom_an)) < 20]
+
+#ecomon 
+ecomon_an <- ecomon_spat %>%st_drop_geometry() %>% drop_na()
+
+ecomon_an <- ecomon_an %>% pivot_longer(cols = ctyp_10m2:lopame_10m2, names_to = "spp", values_to = "count_10m2")
+
+ecomon_types <- read.csv("ecomon_snames.csv")
+
+
+
+ecomon_an <- left_join(ecomon_an, ecomon_types, by = c("spp" = "spp_code"))
+
+ecomon_an$category <- paste(ecomon_an$spp, "ecomon", sep = "_")
+
+
+ecomon_an <- ecomon_an %>% group_by(Region, year, category) %>% summarise(count_10m2 = mean(count_10m2), sfc_temp = mean(sfc_temp), sfc_salt = mean(sfc_salt), btm_temp = mean(btm_temp), btm_salt = mean(btm_salt))
+
+ecomon_an <- ecomon_an %>% ungroup()%>%  pivot_wider(names_from = category, values_from = count_10m2)
+
+ecomon_an <- ecomon_an[ , colSums((ecomon_an == 0)) < 20]
+
+
+
+#trawls 
+trawl_an <- fish_spat %>% st_drop_geometry() %>% drop_na()
+trawl_an <- trawl_an %>% pivot_longer(cols = FOURSPOT.FLOUNDER:PELAGIC.STINGRAY, names_to = "spp", values_to = "biomass")
+
+
+fish_types <- read.csv("spp_use.csv")
+
+trawl_an <- left_join(trawl_an, fish_types, by = c("spp"))
+
+trawl_an$category <- paste(trawl_an$spp, "trawl", sep = "_")
+
+
+trawl_an <- trawl_an %>%  select(year, Region, biomass, category) %>% group_by(Region, year, category) %>% summarise(biomass = mean(biomass))
+
+trawl_an <- trawl_an %>% pivot_wider(names_from = category, values_from = biomass)
+
+trawl_an <- trawl_an[ , colSums((trawl_an == 0)) < 20]
+
+
+```
+
+plot out just whales 
+
+
+###Plotit 
+```{r}
+whale_an %>% ggplot() + geom_point(aes(x = year, y = AbdPerArea)) + geom_smooth(aes(x = year, y = AbdPerArea)) + facet_wrap(~Region, scales = "free")
+
+
+ggplot(data = whale_an, aes(x = year, y = AbdPerArea)) + geom_point() + geom_smooth(method = "glm", colour = "blue") +
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()+ facet_wrap(~Region, scales = "free")
+
+```
+
+
+relate those indices together 
+
+###GAMs 
+total 
+```{r}
+sum <- left_join(whale_an, stom_an, by = c("Region" = "Region", "year" ="year"))
+
+sum <- left_join(sum, ecomon_an, by = c("Region" = "Region", "year" ="year"))
+
+
+sum <- left_join(sum, trawl_an, by = c("Region" = "Region", "year" ="year"))
+
+#sum <- sum %>% mutate(across(c(year:urospp_100m3), ~(scale(.) %>% as.vector)))
+```
+
+Not sure if I should standardize it or not! 
+
+```{r}
+xnames <- colnames(sum[4:ncol(sum)])
+xnames <- c(xnames, "year")
+res_gam <- data.frame(matrix(ncol=3, nrow=1))
+colnames(res_gam) <- c("names", "deviance", "aic")
+
+for (i in 1:length(xnames)) { #for each species in spec_list
+  tryCatch({ fit <- gam(as.formula(paste("AbdPerArea ~ Region +", "s(", xnames[i], ")")), data=sum, method = "REML")
+  aic <- fit$aic
+  res_gam[i,1] <- xnames[i]
+  res_gam[i,2] <- summary(fit)$dev.expl
+  res_gam[i,3] <- aic
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+res_gam <- res_gam[complete.cases(res_gam),]
+
+res_gam %>%
+  mutate(names = fct_reorder(names, deviance)) %>%
+  ggplot( aes(x=names, y=deviance)) +
+    geom_bar(stat="identity", fill="#f68060", width=.4) +
+    coord_flip() + labs(y = "deviance explained (GAM)", x = element_blank())
+```
+
+regional 
+
+```{r}
+xnames <- colnames(sum[4:ncol(sum)])
+xnames <- c(xnames, "year")
+res_gam <- data.frame(matrix(ncol=4, nrow=1))
+colnames(res_gam) <- c("names", "deviance", "aic", "region")
+
+res_gam_mid <- data.frame(matrix(ncol=4, nrow=1))
+colnames(res_gam_mid) <- c("names", "deviance", "aic", "region")
+
+Regions <- unique(sum$Region)
+
+
+  for(b in 1:length(Regions)){
+    region <- Regions[b]
+    use <- sum %>% filter(Region %in% region)
+  for (i in 1:length(xnames)) { #for each species in spec_list
+  tryCatch({ fit <- gam(as.formula(paste("AbdPerArea ~", "s(", xnames[i], ", k = 4)")), data=use, method = "REML")
+  aic <- fit$aic
+  res_gam_mid[i,1] <- xnames[i]
+  res_gam_mid[i,2] <- summary(fit)$dev.expl
+  res_gam_mid[i,3] <- aic
+  res_gam_mid[i, 4] <- region
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+   res_gam <- rbind(res_gam_mid, res_gam)
+  }
+
+res_gam <- res_gam[complete.cases(res_gam),]
+
+
+res_gam %>%
+  mutate(species_fact = names,
+         species = reorder_within(names, deviance, region)) %>%
+  ggplot(aes(deviance, species, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_reordered() +
+  facet_wrap(~region, scales = "free_y")
+
+#this gets out the top X
+res_gam %>%  group_by(`region`) %>% 
+  mutate(
+    `region` = as.factor(`region`),
+    `names` = reorder_within(`names`,`deviance`,`region`)
+  ) %>% 
+  slice_max(`deviance`, n =10)%>%
+  ggplot(aes(deviance, names, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_reordered() +
+  facet_wrap(~region, scales = "free_y")
+```
+I am not sure if a GAM is telling us anything here - deviance explained could just mean that the gam is really squiggly (I limit this a bit by specifying k = 4). I will run a GLM - just note I did try and run random forests but there wasn't enough data 
+
+A GLM will tell us the strength and direction of the linear relationship. 
+
+####Predctions 
+Can infer the strength of a relationship from in and out of sample prediction 
+
+In sample:
+```{r}
+set.seed(NULL)
+
+insamp_perform <- data.frame(matrix(ncol=6, nrow=1))
+colnames(insamp_perform) <- c("variable", "gam_r2", "gam_rmse", "glm_r2", "glm_rmse", "region")
+
+insamp_perform_mid <- data.frame(matrix(ncol=6, nrow=1))
+colnames(insamp_perform_mid) <- c("variable", "gam_r2", "gam_rmse", "glm_r2", "glm_rmse", "region")
+
+
+for(b in 1:length(Regions)){
+    region <- Regions[b]
+    use <- sum %>% filter(Region %in% region)
+  for (i in 1:length(xnames)) { #for each species in spec_list
+  tryCatch({ 
+    #GAM
+fit <- gam(as.formula(paste("AbdPerArea ~", "s(", xnames[i], ", k = 4)")), data=use, method = "REML")
+  
+use1 <- use %>% ungroup() %>% dplyr::select(AbdPerArea, xnames[i]) %>% drop_na()
+gam_pred <- predict(fit, newdata = use1)
+obs <- use1$AbdPerArea
+names(obs) <- "obs"
+
+dat <- cbind(gam_pred, obs)
+dat <- as.data.frame(dat)
+dat1 <- dat
+gam_r2 <- r2_general(dat1$gam_pred, dat1$obs)
+gam_rmse <-  RMSE_func(actual = dat1$obs, pred = dat1$gam_pred) 
+
+#GLM
+fit <- glm(as.formula(paste("AbdPerArea ~", xnames[i])), data=use)
+  
+glm_pred <- predict(fit, newdata = use1)
+obs <- use1$AbdPerArea
+names(obs) <- "obs"
+
+dat <- cbind(glm_pred, obs)
+dat <- as.data.frame(dat)
+dat1 <- dat
+glm_r2 <- r2_general(dat1$glm_pred, dat1$obs)
+glm_rmse <-  RMSE_func(actual = dat1$obs, pred = dat1$glm_pred) 
+
+
+
+  aic <- fit$aic
+  insamp_perform_mid[i,1] <- xnames[i]
+  insamp_perform_mid[i,2] <- gam_r2
+  insamp_perform_mid[i,3] <- gam_rmse
+  insamp_perform_mid[i, 4] <- glm_r2
+  insamp_perform_mid[i, 5] <- glm_rmse
+  insamp_perform_mid[i, 6] <- region
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+   insamp_perform <- rbind(insamp_perform_mid, insamp_perform)
+  }
+
+insamp_perform <- insamp_perform%>% pivot_longer(cols = gam_r2:glm_rmse)
+
+insamp_perform <- insamp_perform %>% separate(name, into = c("model", "metric"), sep = "_")
+
+#this gets out the top X
+insamp_perform %>% filter(metric == "r2") %>%  group_by(`region`, `model`) %>% 
+  mutate(
+    `region` = as.factor(`region`),
+    `model` = as.factor(`model`),
+    `variable` = reorder_within(`variable`,`value`,list(`region`, `model`))
+  ) %>% 
+  slice_max(`value`, n =10)%>%
+  ggplot(aes(value, variable, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_reordered() +
+  facet_wrap(~region + model, scales = "free_y", nrow = 4)
+
+```
+out sample: 
+```{r}
+set.seed(NULL)
+
+outsamp_perform <- data.frame(matrix(ncol=6, nrow=1))
+colnames(outsamp_perform) <- c("variable", "gam_r2", "gam_rmse", "glm_r2", "glm_rmse", "region")
+
+outsamp_perform_mid <- data.frame(matrix(ncol=6, nrow=1))
+colnames(outsamp_perform_mid) <- c("variable", "gam_r2", "gam_rmse", "glm_r2", "glm_rmse", "region")
+
+outsamp_perform_mid2 <- data.frame(matrix(ncol=6, nrow=1))
+colnames(outsamp_perform_mid2) <- c("variable", "gam_r2", "gam_rmse", "glm_r2", "glm_rmse", "region")
+
+for(a in 1:10){
+for(b in 1:length(Regions)){
+    region <- Regions[b]
+    use <- sum %>% filter(Region %in% region)
+  for (i in 1:length(xnames)) { 
+   tryCatch({ 
+    use1 <- use %>% ungroup() %>% dplyr::select(AbdPerArea, xnames[i]) %>% drop_na()
+    smp_size <- floor(0.70 * nrow(use1))
+    train_ind <- sample(seq_len(nrow(use1)), size = smp_size)
+    train <- use1[train_ind, ]
+    test <- use1[-train_ind, ] 
+    #for each species in spec_list
+
+    
+    #GAM
+fit <- gam(as.formula(paste("AbdPerArea ~", "s(", xnames[i], ", k = 4)")), data=train, method = "REML")
+  
+
+gam_pred <- predict(fit, newdata = test)
+obs <- test$AbdPerArea
+names(obs) <- "obs"
+
+dat <- cbind(gam_pred, obs)
+dat <- as.data.frame(dat)
+dat1 <- dat
+gam_r2 <- r2_general(dat1$gam_pred, dat1$obs)
+gam_rmse <-  RMSE_func(actual = dat1$obs, pred = dat1$gam_pred) 
+
+#GLM
+fit <- glm(as.formula(paste("AbdPerArea ~", xnames[i])), data=train)
+  
+glm_pred <- predict(fit, newdata = test)
+obs <- test$AbdPerArea
+names(obs) <- "obs"
+
+dat <- cbind(glm_pred, obs)
+dat <- as.data.frame(dat)
+dat1 <- dat
+glm_r2 <- r2_general(dat1$glm_pred, dat1$obs)
+glm_rmse <-  RMSE_func(actual = dat1$obs, pred = dat1$glm_pred) 
+
+
+
+  aic <- fit$aic
+  outsamp_perform_mid[i,1] <- xnames[i]
+  outsamp_perform_mid[i,2] <- gam_r2
+  outsamp_perform_mid[i,3] <- gam_rmse
+  outsamp_perform_mid[i, 4] <- glm_r2
+  outsamp_perform_mid[i, 5] <- glm_rmse
+  outsamp_perform_mid[i, 6] <- region
+
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+  outsamp_perform_mid2 <- rbind(outsamp_perform_mid, outsamp_perform_mid2)
+}
+  outsamp_perform <- rbind(outsamp_perform_mid2, outsamp_perform)
+}
+outsamp_perform <- outsamp_perform%>% pivot_longer(cols = gam_r2:glm_rmse)
+
+outsamp_perform <- outsamp_perform %>% separate(name, into = c("model", "metric"), sep = "_")
+
+outsamp_perform_grouped <- outsamp_perform %>% drop_na() %>% group_by(region, model, metric, variable) %>% summarise(var_mean = mean(value), var_sd = sd(value)) 
+
+#this gets out the top X
+outsamp_perform_grouped %>% filter(metric == "r2")  %>% filter(var_mean > 0) %>%  group_by(`region`, `model`) %>%
+  mutate(
+`region` = as.factor(`region`),
+`model` = as.factor(`model`),
+`value` = mean(`var_mean`),
+`variable` = reorder_within(`variable`,`value`,list(`region`, `model`))
+) %>%
+slice_max(`value`, n =10)%>%
+  ggplot(aes(value, variable, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_reordered() +
+  facet_wrap(~region + model, scales = "free_y", nrow = 4)
+
+```
+###GLM
+```{r}
+xnames <- colnames(sum[4:ncol(sum)])
+xnames <- c(xnames, "year")
+res_glm <- data.frame(matrix(ncol=6, nrow=1))
+colnames(res_glm) <- c("names", "deviance", "p_val", "region", "coef", "AIC")
+
+res_glm_mid <- data.frame(matrix(ncol=6, nrow=1))
+colnames(res_glm_mid) <- c("names", "deviance", "p_val", "region", "coef", "AIC")
+
+Regions <- unique(sum$Region)
+
+
+  for(b in 1:length(Regions)){
+    region <- Regions[b]
+    use <- sum %>% filter(Region %in% region)
+  for (i in 1:length(xnames)) { #for each species in spec_list
+  tryCatch({ fit <- lm(as.formula(paste("AbdPerArea ~", xnames[i])), data=use)
+  p_val <- summary(fit)$coefficients[2,4]
+  dev <- summary(fit)$adj.r.squared
+  res_glm_mid[i,1] <- xnames[i]
+  res_glm_mid[i,2] <- dev
+  res_glm_mid[i,3] <- p_val
+  res_glm_mid[i, 4] <- region
+  res_glm_mid[i, 5] <- fit$coefficients[2]
+    res_glm_mid[i, 6] <- AIC(fit)
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+   res_glm <- rbind(res_glm_mid, res_glm)
+  }
+
+res_glm <- res_glm[complete.cases(res_glm),]
+res_glm$direction <- ifelse(res_glm$coef > 0, "positive", "negative")
+
+res_glm %>%
+  mutate(species_fact = names,
+         species = reorder_within(names, deviance, region)) %>%
+  ggplot(aes(deviance, species, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_reordered() +
+  facet_wrap(~region, scales = "free_y")
+
+#this gets out the top X
+res_glm %>%  group_by(`region`) %>% 
+  mutate(
+    `region` = as.factor(`region`),
+    `names` = reorder_within(`names`,`deviance`,`region`)
+  ) %>% 
+  slice_max(`deviance`, n =10)%>%
+  ggplot(aes(deviance, names, fill = direction)) +
+  geom_col(show.legend = TRUE) +
+  scale_y_reordered() +
+  facet_wrap(~region, scales = "free_y")+ scale_fill_manual(values = c("light blue", "orange"))
+
+#this gets out the top X
+res_glm %>%  group_by(`region`) %>% 
+  mutate(
+    `region` = as.factor(`region`),
+    `names` = reorder_within(`names`,-`AIC`,`region`)
+  ) %>% 
+  slice_min(`AIC`, n =10)%>%
+  ggplot(aes(-AIC, names, fill = direction)) +
+  geom_col(show.legend = TRUE) +
+  scale_y_reordered() +
+  facet_wrap(~region, scales = "free_y")+ scale_fill_manual(values = c("light blue", "orange"))
+```
+```{r}
+res_glm$cat <- ifelse(res_glm$names %in% c("sfc_temp", "sfc_salt", "btm_temp", "btm_salt"), "env", "prey")
+```
+
+
+```{r}
+res_glm %>% filter(names != "year")%>% ggplot(aes(y = deviance, x = cat, colour = cat)) + geom_boxplot() + stat_compare_means(method = "wilcox")
+```
+
+
+###Correlation
+
+```{r}
+xnames <- colnames(sum[4:ncol(sum)])
+xnames <- c(xnames, "year")
+res_cor <- data.frame(matrix(ncol=3, nrow=1))
+colnames(res_cor) <- c("ycor1", "names", "region")
+
+
+Regions <- unique(sum$Region)
+
+ for(b in 1:length(Regions)){
+    region <- Regions[b]
+    use <- sum %>% filter(Region %in% region) 
+    use <- use[ , colSums(is.na(use)) < 10]
+    use <- use %>% drop_na() %>% ungroup() %>% dplyr::select(-Region)
+    ycor <- cor(use, method = "spearman")
+    ycor <-  as.data.frame(ycor) 
+    rownames(ycor) <- colnames(ycor)
+    ycor1 <- ycor$AbdPerArea
+    ycor1 <- as.data.frame(ycor1)
+    ycor1$names <- rownames(ycor)
+    ycor1$region <- region
+    res_cor <- rbind(ycor1, res_cor)
+
+}
+
+res_cor <-res_cor %>% filter(names !="AbdPerArea")
+
+res_cor$direction <- ifelse(res_cor$ycor1 > 0,"positive", "negative")
+res_cor$abscor <- abs(res_cor$ycor1)
+
+#this gets out the top X
+res_cor %>%  group_by(`region`) %>% 
+  mutate(
+    `region` = as.factor(`region`),
+    `names` = reorder_within(`names`,`abscor`,`region`)
+  ) %>% 
+  slice_max(`abscor`, n =10)%>%
+  ggplot(aes(abscor, names, fill = direction)) +
+  geom_col(show.legend = TRUE) +
+  scale_y_reordered() +
+  facet_wrap(~region, scales = "free_y") + scale_fill_manual(values = c("light blue", "orange"))
+```
+
+
+
+copepods, mysids/amphipods/icthyoplankton, and euphausiids. 
+
+Spring was defined from March to May,
+summer from June to August, 
+fall from September to November
+and winter from December to February. 
+
+```{r}
+
+gam_am <- gam(AbdPerArea ~ s(AMMODYTIDAE, k = 4) , data = subset(sum, sum$Region == "SNE"))
+summary(gam_am)
+
+
+plot(gam_am, residuals = T, pch = 16, shift = mean(sum$AbdPerArea, 
+    na.rm = T), ylab = "AbdPerArea", pages = 1)
+```
+Conclusion - Althought there is a strong GAM relationship between humpbacks and sand lance, that isnt linear
+
+
+
+##seasonal
+Here year will start in December 
+```{r}
+
+#whale
+whale_mon <- whale_spat %>% st_drop_geometry() %>% drop_na() %>% mutate(season = if_else(month == 12 | month == 1 | month == 2, "winter", if_else(month == 3 | month == 4| month == 5, "spring", if_else(month == 6| month == 7| month == 8, "summer", "fall")))) %>% mutate(year_2 = year-(min(year-1))) %>% mutate()
+
+whale_mon <- whale_mon %>% mutate(year_2 = if_else(month == 12, year_2-1, year_2))
+
+whale_mon <- whale_mon %>% group_by(Region, year_2, season) %>% summarise(Individu_1 = sum(Individu_1), length = sum(SegmentAre)) 
+
+whale_mon <- whale_mon %>% drop_na() %>% mutate(AbdPerArea = Individu_1/length) 
+
+
+#stomach - total species specific prey weight/total predator stomachs
+  #need to add in a column for unique predators 
+
+stom_mon <- stom_spat %>% st_drop_geometry() %>% drop_na() %>% st_drop_geometry() %>% drop_na() %>% mutate(season = if_else(month == 12 | month == 1 | month == 2, "winter", if_else(month == 3 | month == 4| month == 5, "spring", if_else(month == 6| month == 7| month == 8, "summer", "fall")))) %>% mutate(year_2 = year-(min(year-1))) %>% mutate()
+
+stom_mon <- stom_mon %>% mutate(year_2 = if_else(month == 12, year_2-1, year_2))
+
+stom_mon <- stom_mon %>%mutate(pdcount = 1) %>% group_by(Region, year_2, season, analsci) %>% summarise(pyamtw = sum(pyamtw)/sum(pdcount)) %>% ungroup()
+
+  #get rid of empty strings
+stom_mon <- stom_mon[!apply(stom_mon, 1, function(x) any(x=="")),] 
+
+stom_mon <- stom_mon %>% ungroup()%>%  pivot_wider(names_from = analsci, values_from = pyamtw)
+
+stom_mon <- stom_mon[ , colSums(is.na(stom_mon)) < 200]
+
+#ecomon 
+ecomon_mon <- ecomon_spat %>%st_drop_geometry() %>% drop_na() %>% dplyr::select(c(cruise_name:btm_salt, volume_100m3:pnepau_100m3, nofish_100m3:Type)) 
+
+ecomon_mon <- ecomon_mon %>% pivot_longer(cols = ctyp_100m3:lopame_100m3, names_to = "spp", values_to = "count_100m3")
+
+ecomon_mon <- ecomon_mon  %>% st_drop_geometry() %>% drop_na() %>% mutate(season = if_else(month == 12 | month == 1 | month == 2, "winter", if_else(month == 3 | month == 4| month == 5, "spring", if_else(month == 6| month == 7| month == 8, "summer", "fall")))) %>% mutate(year_2 = year-(min(year-1))) %>% mutate()
+
+ecomon_mon <- ecomon_mon %>% mutate(year_2 = if_else(month == 12, year_2-1, year_2))
+
+
+
+ecomon_mon <- ecomon_mon %>% group_by(Region, year_2, season, spp) %>% summarise(count_100m3 = mean(count_100m3), sfc_temp = mean(sfc_temp), sfc_salt = mean(sfc_salt), btm_temp = mean(btm_temp), btm_salt = mean(btm_salt))
+
+ecomon_mon <- ecomon_mon %>% ungroup()%>%  pivot_wider(names_from = spp, values_from = count_100m3)
+
+ecomon_mon <- ecomon_mon[ , colSums((ecomon_mon == 0)) < 100]
+
+
+
+whale_mon$Region <- factor(whale_mon$Region, levels = c("GB", "GOM", "SNE", "MAB"))
+
+ggplot(data = whale_mon, aes(x = year_2+1995, y = AbdPerArea*100000)) + geom_point() + geom_smooth(method = "glm", colour = "blue") +
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()+ facet_wrap(~Region + season, scales = "free") + labs(x = "year", y = "humpback denisty")
+
+
+
+```
+
+consistent sampling 
+```{r}
+#whale
+whale_samp <- whale_spat %>% st_drop_geometry() %>% drop_na() %>% mutate(season = if_else(month == 12 | month == 1 | month == 2, "winter", if_else(month == 3 | month == 4| month == 5, "spring", if_else(month == 6| month == 7| month == 8, "summer", "fall")))) %>% mutate(year_2 = year-(min(year-1))) %>% mutate()
+
+whale_samp <- whale_samp %>% mutate(year_2 = if_else(month == 12, year_2-1, year_2))
+
+whale_samp %>% ggplot() + geom_histogram(aes(x = year, fill = as.factor(season))) + facet_wrap(~Region, scales = "free_y")
+
+```
+
+relate those indices together 
+
+###GAMs 
+total 
+```{r}
+sum_mon <- left_join(whale_mon, stom_mon, by = c("Region" = "Region", "year_2" ="year_2", "season" = "season"))
+
+sum_mon <- left_join(sum_mon, ecomon_mon, by = c("Region" = "Region", "year_2" ="year_2", "season" = "season"))
+
+#sum <- sum %>% mutate(across(c(year:urospp_100m3), ~(scale(.) %>% as.vector)))
+```
+
+regional + seasonal
+
+```{r}
+xnames <- colnames(sum_mon[5:ncol(sum_mon)])
+xnames <- c(xnames, "year")
+res_gam <- data.frame(matrix(ncol=4, nrow=1))
+colnames(res_gam) <- c("names", "deviance", "aic", "region_season")
+
+res_gam_mid <- data.frame(matrix(ncol=4, nrow=1))
+colnames(res_gam_mid) <- c("names", "deviance", "aic", "region_season")
+
+
+
+sum_mon$region_season <- paste(sum_mon$Region, sum_mon$season, sep = "_")
+region_seasons <- unique(sum_mon$region_season)
+
+test <- res_gam_mid
+
+  for(b in 1:length(region_seasons)){
+    region_season1 <- region_seasons[b]
+    use <- sum_mon %>% filter(region_season %in% region_season1)
+  for (i in 1:length(xnames)) { #for each species in spec_list
+  tryCatch({ fit <- gam(as.formula(paste("AbdPerArea ~", "s(", xnames[i], ")")), data=use, method = "REML")
+  aic <- fit$aic
+  res_gam_mid[i,1] <- xnames[i]
+  res_gam_mid[i,2] <- summary(fit)$dev.expl
+  res_gam_mid[i,3] <- aic
+  res_gam_mid[i, 4] <- region_season1
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+   res_gam <- rbind(res_gam_mid, res_gam)
+  }
+
+res_gam <- res_gam[complete.cases(res_gam),]
+
+res_gam <- res_gam %>% separate(region_season, into = c("region", "season"), sep = "_")
+
+res_gam <- res_gam %>% unique()
+
+#this gets out the top X
+res_gam %>%  group_by(`region`, `season`) %>% 
+  mutate(
+    `region` = as.factor(`region`),
+    `season` = as.factor(`season`),
+    `names` = reorder_within(`names`,`deviance`,list(`region`, `season`))
+  ) %>% 
+  slice_max(`deviance`, n =10)%>%
+  ggplot(aes(deviance, names, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_reordered() +
+  facet_wrap(~region + season, scales = "free")
+```
+The problem with the above approach is that there isn't enough data for sand lance seasonally 
+
+
+##annual - grouped level 
+summarize prey at the species level 
+```{r}
+#whale
+whale_an <- whale_spat %>% st_drop_geometry() %>% drop_na() %>% group_by(Region, year) %>% summarise(Individu_1 = sum(Individu_1), length = sum(SegmentAre)) 
+
+whale_an <- whale_an %>% drop_na() %>% group_by(Region, year) %>% summarise(AbdPerArea = Individu_1/length) 
+
+
+#stomach - total species specific prey weight/total predator stomachs
+  #need to add in a column for unique predators 
+
+
+stom_an <- stom_spat %>% st_drop_geometry() %>% drop_na() 
+stom_an$category <- paste(stom_an$analsci, "stomach", sep = "_")
+
+
+stom_an <- stom_an %>%mutate(pdcount = 1) %>% group_by(Region, year, category) %>% summarise(pyamtw = sum(pyamtw)/sum(pdcount)) %>% ungroup()
+
+  #get rid of empty strings
+stom_an <- stom_an[!apply(stom_an, 1, function(x) any(x=="")),] 
+
+stom_an <- stom_an %>% ungroup()%>%  pivot_wider(names_from = category, values_from = pyamtw)
+
+stom_an <- stom_an[ , colSums(is.na(stom_an)) < 20]
+
+#ecomon 
+ecomon_an <- ecomon_spat %>%st_drop_geometry() %>% drop_na()
+
+ecomon_an <- ecomon_an %>% pivot_longer(cols = ctyp_10m2:lopame_10m2, names_to = "spp", values_to = "count_10m2")
+
+ecomon_types <- read.csv("ecomon_snames.csv")
+
+
+
+ecomon_an <- left_join(ecomon_an, ecomon_types, by = c("spp" = "spp_code"))
+
+ecomon_an$category <- paste(ecomon_an$additional_category, "ecomon", sep = "_")
+
+ecomon_env <- ecomon_an %>% group_by(Region, year) %>% summarise(sfc_temp = mean(sfc_temp), sfc_salt = mean(sfc_salt), btm_temp = mean(btm_temp), btm_salt = mean(btm_salt))
+                                                                               
+ecomon_an <- ecomon_an %>% group_by(Region, year, category) %>% summarise(count_10m2 = mean(count_10m2))
+
+ecomon_an <- ecomon_an %>% ungroup()%>%  pivot_wider(names_from = category, values_from = count_10m2)
+
+
+ecomon_an <- ecomon_an[ , colSums((ecomon_an == 0)) < 20]
+
+ecomon_an <- left_join(ecomon_an, ecomon_env, by = c("Region", "year"))
+
+#trawls 
+trawl_an <- fish_spat %>% st_drop_geometry() %>% drop_na()
+trawl_an <- trawl_an %>% pivot_longer(cols = FOURSPOT.FLOUNDER:PELAGIC.STINGRAY, names_to = "spp", values_to = "biomass")
+
+
+fish_types <- read.csv("spp_use.csv")
+
+trawl_an <- left_join(trawl_an, fish_types, by = c("spp"))
+trawl_an$other_category <- gsub(pattern = ' ', replacement = "_", x = trawl_an$other_category)
+
+trawl_an$category <- paste(trawl_an$other_category, "trawl", sep = "_")
+
+
+trawl_an <- trawl_an %>%  select(year, Region, biomass, category) %>% group_by(Region, year, category) %>% summarise(biomass = mean(biomass))
+
+trawl_an <- trawl_an %>% pivot_wider(names_from = category, values_from = biomass)
+
+trawl_an <- trawl_an[ , colSums((trawl_an == 0)) < 20]
+
+
+```
+
+###GAMs 
+total 
+```{r}
+sum <- left_join(whale_an, stom_an, by = c("Region" = "Region", "year" ="year"))
+
+sum <- left_join(sum, ecomon_an, by = c("Region" = "Region", "year" ="year"))
+
+
+sum <- left_join(sum, trawl_an, by = c("Region" = "Region", "year" ="year"))
+
+sum <- sum %>% select(-NA_trawl, -NA_ecomon)
+#sum <- sum %>% mutate(across(c(year:urospp_100m3), ~(scale(.) %>% as.vector)))
+```
+
+```{r}
+xnames <- colnames(sum[4:ncol(sum)])
+xnames <- c(xnames, "year")
+res_gam <- data.frame(matrix(ncol=4, nrow=1))
+colnames(res_gam) <- c("names", "deviance", "aic", "region")
+
+res_gam_mid <- data.frame(matrix(ncol=4, nrow=1))
+colnames(res_gam_mid) <- c("names", "deviance", "aic", "region")
+
+Regions <- unique(sum$Region)
+
+
+  for(b in 1:length(Regions)){
+    region <- Regions[b]
+    use <- sum %>% filter(Region %in% region)
+  for (i in 1:length(xnames)) { #for each species in spec_list
+  tryCatch({ fit <- gam(as.formula(paste("AbdPerArea ~", "s(", xnames[i], ", k = 4)")), data=use, method = "REML")
+  aic <- fit$aic
+  res_gam_mid[i,1] <- xnames[i]
+  res_gam_mid[i,2] <- summary(fit)$dev.expl
+  res_gam_mid[i,3] <- aic
+  res_gam_mid[i, 4] <- region
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+   res_gam <- rbind(res_gam_mid, res_gam)
+  }
+
+res_gam <- res_gam[complete.cases(res_gam),]
+
+
+res_gam %>%
+  mutate(species_fact = names,
+         species = reorder_within(names, deviance, region)) %>%
+  ggplot(aes(deviance, species, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_reordered() +
+  facet_wrap(~region, scales = "free_y")
+
+#this gets out the top X
+res_gam %>%  group_by(`region`) %>% 
+  mutate(
+    `region` = as.factor(`region`),
+    `names` = reorder_within(`names`,`deviance`,`region`)
+  ) %>% 
+  slice_max(`deviance`, n =10)%>%
+  ggplot(aes(deviance, names, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_reordered() +
+  facet_wrap(~region, scales = "free_y")
+```
+
+###GLM
+```{r}
+xnames <- colnames(sum[4:ncol(sum)])
+xnames <- c(xnames, "year")
+res_glm <- data.frame(matrix(ncol=5, nrow=1))
+colnames(res_glm) <- c("names", "deviance", "p_val", "region", "coef")
+
+res_glm_mid <- data.frame(matrix(ncol=5, nrow=1))
+colnames(res_glm_mid) <- c("names", "deviance", "p_val", "region", "coef")
+
+Regions <- unique(sum$Region)
+
+
+  for(b in 1:length(Regions)){
+    region <- Regions[b]
+    use <- sum %>% filter(Region %in% region)
+  for (i in 1:length(xnames)) { #for each species in spec_list
+  tryCatch({ fit <- lm(as.formula(paste("AbdPerArea ~", xnames[i])), data=use)
+  p_val <- summary(fit)$coefficients[2,4]
+  dev <- summary(fit)$adj.r.squared
+  res_glm_mid[i,1] <- xnames[i]
+  res_glm_mid[i,2] <- dev
+  res_glm_mid[i,3] <- p_val
+  res_glm_mid[i, 4] <- region
+  res_glm_mid[i, 5] <- fit$coefficients[2]
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+   res_glm <- rbind(res_glm_mid, res_glm)
+  }
+
+res_glm <- res_glm[complete.cases(res_glm),]
+res_glm$direction <- ifelse(res_glm$coef > 0, "positive", "negative")
+
+res_glm %>%
+  mutate(species_fact = names,
+         species = reorder_within(names, deviance, region)) %>%
+  ggplot(aes(deviance, species, fill = region)) +
+  geom_col(show.legend = FALSE) +
+  scale_y_reordered() +
+  facet_wrap(~region, scales = "free_y")
+
+#this gets out the top X
+res_glm %>%  group_by(`region`) %>% 
+  mutate(
+    `region` = as.factor(`region`),
+    `names` = reorder_within(`names`,`deviance`,`region`)
+  ) %>% 
+  slice_max(`deviance`, n =10)%>%
+  ggplot(aes(deviance, names, fill = direction)) +
+  geom_col(show.legend = TRUE) +
+  scale_y_reordered() +
+  facet_wrap(~region, scales = "free_y")+ scale_fill_manual(values = c("light blue", "orange"))
+```
+what is the average deviance explained of prey vs. the environment? 
+```{r}
+res_glm$cat <- ifelse(res_glm$names %in% c("sfc_temp", "sfc_salt", "btm_temp", "btm_salt"), "env", "prey")
+```
+
+
+```{r}
+res_glm %>% filter(names != "year")%>% ggplot(aes(y = deviance, x = cat, colour = cat)) + geom_boxplot() + stat_compare_means(method = "wilcox")
+```
+
+
+#Distance from southernmost point 
+1. create a grid 
+2. use only grid cells that have consistent sampling over time 
+3. calculate grid cell of density for each year (season)
+4. relate that to environmental and prey species. 
+
+
+##1. create grid 
+```{r}
+
+globe_bb <- matrix(c(-84,  20,
+                      -84,  50,
+                      -52, 50,
+                     -52, 20,
+                     -84,  20), byrow = TRUE, ncol = 2) %>%
+  list() %>% 
+  st_polygon() %>% 
+  st_sfc(., crs = 4326)
+
+# generate grid of 128 x 128 tiles (each .5 x .5 degrees)
+grid <- st_make_grid(globe_bb, n = c(126, 126), 
+                                 crs = 4326, what = 'polygons') %>%
+  st_sf('geometry' = ., data.frame('ID' = 1:length(.)))
+
+
+
+whale_spat <- whale
+
+
+coordinates(whale_spat) <- ~ X_mid + Y_mid
+whale_spat <- st_as_sf(whale_spat)
+
+whale_spat <- st_set_crs(whale_spat, 4326)
+
+
+
+#checkit
+ggplot(data = world) + geom_sf() +geom_sf(data = globe_bb) + geom_point(data = whale, aes(x = X_mid, y = Y_mid)) + 
+    coord_sf(xlim=c(-90, -20), ylim=c(20,60), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+ggplot(data = world) + geom_sf() +geom_sf(data = grid) + geom_point(data = whale, aes(x = X_mid, y = Y_mid)) + 
+    coord_sf(xlim=c(-90, -20), ylim=c(20,60), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+
+whale_spat <- st_intersection(whale_spat,grid)
+
+ggplot(data = world) + geom_sf()+ geom_sf(data = whale_spat, aes(colour = ID.1)) + 
+    coord_sf(xlim=c(-90, -20), ylim=c(20,60), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+```
+
+
+##1.2 consistent grid 
+find grid cells that were consistently sampled through time 
+
+```{r}
+whale_spat <- whale_spat %>% mutate(gridID = ID.1)
+
+
+#annual
+#unique years 
+length(unique(whale_spat$year))
+
+grouped <- whale_spat %>% st_drop_geometry() %>% select(year, gridID) %>% unique %>% group_by(gridID) %>% tally() 
+
+whale_spat <- left_join(whale_spat, grouped, by = "gridID")
+
+whale_coords <- whale_spat %>% st_coordinates() 
+
+whale_spat <- cbind(whale_spat, whale_coords)
+
+whale_spat <- whale_spat %>% filter(Y > 40) #this just gets out the gulf of maine/new england area 
+
+grouped <- whale_spat %>% st_drop_geometry() %>% select(year, gridID) %>% unique %>% group_by(gridID) %>% tally() 
+
+#50 grid cells have 18 years worth of data so lets start with those 
+
+ggplot() +geom_sf(data = grid) + geom_sf(data = subset(whale_spat, whale_spat$n > 17), aes(colour = n)) + geom_sf(data = world)+ 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+```
+
+50 grid cells have 18 years worth of data so lets start with those 
+
+make sure that there wasn't a shift in timing of surveys 
+
+```{r}
+whale_use <- whale_spat %>% filter(n > 17)
+seasonal_check <- whale_spat %>% filter(gridID %in% whale_use$gridID)
+seasonal_check %>% ggplot(aes(x = month, fill = factor(month))) + geom_histogram(stat = "count") + facet_wrap(~year)
+```
+##1.3 Spring centroids 
+Look at only the spring as not to bias towards differential sampling 
+
+```{r}
+
+whale_use <- whale_spat %>% filter(n > 17)
+whale_use <- whale_use %>% filter(month == 4 | month == 5 | month == 6 )
+
+ggplot(data = world) + geom_sf()+ geom_sf(data = whale_use, aes(colour = month), size = 2, shape = 15)+
+    coord_sf(xlim=c(-75, -65), ylim=c(40,44), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black")) + facet_wrap(~year)
+
+
+
+###1.3.2 calculate it 
+grids <- st_centroid(grid) 
+
+centroids <- st_coordinates(grids)
+centroids <- cbind(grids, centroids)
+centroids <- centroids %>% rename(X_mid = X, Y_mid = Y) %>% st_drop_geometry()
+
+#group by grid cell and year to find gridded abundances 
+whale_use <- whale_use %>% st_drop_geometry() %>% group_by(gridID, year)  %>% summarise(Individu_1 = sum(Individu_1), length = sum(SegmentAre)) 
+
+whale_use <- whale_use %>% drop_na() %>% group_by(gridID, year) %>% summarise(AbdPerArea = Individu_1/length) 
+
+whale_use <- left_join(whale_use, centroids, by = c("gridID"= "ID"))
+
+#find mean centroids of abundance (this is gridded so a bit coarse
+
+#for loop for each year 
+years <- unique(whale_use$year)
+weighted_centroids <- data.frame(matrix(nrow =1, ncol = 3))
+colnames(weighted_centroids) <- c("X", "Y", "year")
+
+for (i in 1:length(years)){
+  year_use = years[i]
+  use <- whale_use %>% filter(year %in% year_use)
+  whale_mid <- use 
+  coordinates(whale_mid) <- ~ X_mid + Y_mid
+  whale_cent <- wt.centroid(whale_mid, p = "AbdPerArea")
+  weighted_centroids[i, 1] <- whale_cent@coords[1]
+  weighted_centroids[i, 2] <- whale_cent@coords[2]
+  weighted_centroids[i, 3] <- year_use
+  
+  
+}
+
+#distance from boston 
+boston <- c(-71.021856, 42.399123)
+weighted_centroids_dist <- distGeo(weighted_centroids, boston)
+
+weighted_centroids$boston <- weighted_centroids_dist
+
+weighted_centroids_hump <- weighted_centroids
+
+#distance from stellwagen 
+stellwagen <- st_read("stellb/data/NationalMarineSanctuary.shp")
+stellwagen_2 <- st_centroid(stellwagen)
+
+coordinates(weighted_centroids) <- ~ X + Y
+weighted_centroids <- st_as_sf(weighted_centroids)
+
+weighted_centroids <- st_set_crs(weighted_centroids, 4326)
+stellwagen <- st_set_crs(stellwagen, 4326)
+weighted_centroids_dist <- st_distance(weighted_centroids, stellwagen)
+
+weighted_centroids$stellwagen <- weighted_centroids_dist
+
+stellwagen_2 <- st_set_crs(stellwagen_2, 4326)
+weighted_centroids_dist <- st_distance(weighted_centroids, stellwagen_2)
+
+weighted_centroids$stellwagen_center <- weighted_centroids_dist
+
+
+
+#get back into dataframe 
+cent_coords <- weighted_centroids %>% st_coordinates() 
+
+weighted_centroids <- cbind(weighted_centroids, cent_coords)
+weighted_centroids <- weighted_centroids %>% st_drop_geometry()
+weighted_centroids$stellwagen <- as.numeric(weighted_centroids$stellwagen)
+weighted_centroids$stellwagen_center <- as.numeric(weighted_centroids$stellwagen_center)
+weighted_centroids_hump <- weighted_centroids
+
+
+
+ggplot(data = weighted_centroids_hump,aes(x = year, y = Y)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = year, y = Y), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point() + labs(y = "latitude")
+
+ggplot(data = weighted_centroids_hump,aes(x = year, y = boston)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = year, y = boston), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point() + labs(y = "distance to boston")
+
+ggplot(data = weighted_centroids_hump,aes(x = year, y = stellwagen)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = year, y = stellwagen), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point() + labs(y = "distance to stellwagen")
+
+
+
+
+ggplot(data = world) + geom_sf()+ geom_point(data = subset(whale_use, whale_use$AbdPerArea > 0), aes(x = X_mid, y = Y_mid, colour = AbdPerArea), size = 2, shape = 15) +scale_colour_gradient2(
+  low = "#56B1F7",
+  mid = "yellow",
+  high = "dark red",
+  midpoint = .00000001,
+  aesthetics = "colour"
+)+
+    coord_sf(xlim=c(-75, -65), ylim=c(40,44), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black")) + facet_wrap(~year)
+
+
+
+weighted_centroids_hump$heatwave <- ifelse(weighted_centroids_hump$year < 2013, "pre_2012_heatwave", "post_2012_heatwave")
+
+ggplot(data = world) + geom_sf()+ geom_point(data = weighted_centroids_hump, aes(x = X, y = Y, colour = heatwave)) + 
+    coord_sf(xlim=c(-75, -65), ylim=c(40,45), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black")) + theme(legend.position = "bottom")
+
+weighted_centroids_hump %>% ggplot(aes(y = stellwagen_center, x = heatwave, colour = heatwave)) + geom_boxplot() + stat_compare_means(method = "wilcox")
+
+weighted_centroids_hump <- weighted_centroids_hump %>% select(-boston, -stellwagen)
+
+
+p1 <- ggplot(data = world) + geom_sf()+ geom_point(data =  weighted_centroids_hump, aes(x = X, y = Y, colour = year)) + geom_sf(data = stellwagen_2, colour = "red") + geom_sf(data=stellwagen, fill = NA, colour = "red")+
+    coord_sf(xlim=c(-75, -65), ylim=c(40,45), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black")) + theme(legend.position=c(.8,.3))
+
+p1
+
+p2 <- ggplot(data = weighted_centroids_hump,aes(x = year, y = stellwagen_center)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = year, y = stellwagen_center), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point() + labs(y = "distance to stellwagen")
+
+p3 <- p1 + p2+ plot_annotation(tag_levels = 'A')
+
+ggsave(filename = "figures/Figure1.png", plot=p3, width = 25, height=10, units=c("cm"), dpi=500)
+```
+##1.3 Area occupied 
+- has their total area occupied changed? (grid cells they were present in/area surveyed)
+
+```{r}
+occ <- whale_use %>% filter(AbdPerArea > 0) %>% group_by(year) %>% tally()
+occ$total_grid <- length(unique(whale_use$gridID))
+occ <- occ %>% mutate(perc_occupied = n/total_grid)
+
+ggplot(data = occ ,aes(x = year, y = perc_occupied)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) +
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+```
+They might be expanding their range a bit 
+
+
+looks like maybe they are moving inshore - can relate this shift to changes in prey abundances. 
+
+
+#1.4	How are humpbacks using areas differently? 
+-	What proportion of their density is in each area (stellwagen vs. southeast channel) in each year 
+
+```{r}
+
+stellwagen <- st_read("stellb/data/NationalMarineSanctuary.shp")
+GSC_pots <- st_read("Great_South_Channel_Restricted_Trap-Pot_Area/Great_South_Channel_Restricted_Trap-Pot_Area.shp")
+GSC_dredge <- st_read("HabitatClamDredgeExemption_GreatSouthChannel2020616/HabitatClamDredgeExemption_GreatSouthChannel2020.shp")
+
+ggplot() + geom_sf(data = world)+ geom_sf(data = stellwagen, aes(colour = "stellwagen"), fill = NA)+ geom_sf(data = GSC_pots,aes(colour = "GSC Pots"), fill = NA) + geom_sf(data = GSC_dredge, aes(colour = "GSC dredge"), fill = NA) + 
+    coord_sf(xlim=c(-75, -65), ylim=c(40,45), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+```
+what was their density in each area per year (number of individuals/area occupied) - I am not sure if I then need to divide by the area of each protected area 
+
+```{r}
+GSC_pots <- st_transform(GSC_pots, 4326)
+st_crs(GSC_pots)
+st_crs(whale_use)
+GSC_area <- st_intersection(GSC_pots, whale_use) #these are all the whale poinst within GSC 
+
+stellwagen <- st_transform(stellwagen, 4326)
+st_crs(stellwagen)
+stellwagen_area <- st_intersection(stellwagen, whale_use) #these are all the whale poinst within GSC 
+
+
+
+ggplot() + geom_sf(data = world)+ geom_sf(data = GSC_area) + geom_sf(data = stellwagen_area) +
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+stellwagen_use <- stellwagen_area %>% st_drop_geometry() %>% group_by(year) %>% summarise(stell_densityarea = (sum(Individu_1)/sum(SegmentAre))/AREA_KM, stell_density = sum(Individu_1)/sum(SegmentAre)) %>% distinct()
+
+GSC_area1 <- GSC_pots %>% mutate(area = set_units(st_area(GSC_pots), "km2"))
+GSC_area1 <- GSC_area1$area
+GSC_area1 <- GSC_area1 %>% drop_units
+
+#I 
+
+stellwagen_area1 <- stellwagen %>% mutate(area = set_units(st_area(stellwagen), "km2")) #nice it is the same 
+
+GSC_use <- GSC_area %>% st_drop_geometry() %>% group_by(year) %>% summarise(GSC_densityarea = (sum(Individu_1)/sum(SegmentAre))/GSC_area1, GSC_density = sum(Individu_1)/sum(SegmentAre))
+
+changing_area <- left_join(stellwagen_use, GSC_use, by = "year")
+changing_area <- changing_area %>% pivot_longer(stell_densityarea:GSC_density, values_to = "density", names_to = "area")
+changing_area <- changing_area %>% separate(area, into = c("protected_area", "metric"))
+
+ggplot(data = changing_area) + geom_line(aes(x = year, y = density, colour = protected_area)) + facet_wrap(~metric, scales = "free_y")
+
+#I think it is okay to just look at density (because area surveyed should take into account spatial differences)
+
+changing_area %>% filter(metric == "density") %>% ggplot(aes(x = year, y = density, colour = protected_area)) + geom_line() +
+  stat_poly_line() +
+  stat_poly_eq()
+```
+To me it looks like how they area using Stellwagen bank has changed, while the way they are using GSC has not over the years - r2 is the same if you do it both/area or not 
+
+##prey patchiness 
+
+```{r}
+remotes::install_github("r-spatialecology/landscapemetrics")
+library(landscapemetrics)
+
+```
+
+
+How to calculate patchiness 
+
+https://www.frontiersin.org/articles/10.3389/fmars.2022.932169/full 
+
+Lloyd’s index of patchiness (P;Lloyd 1967) from https://www.int-res.com/articles/meps2003/257/m257p233.pdf 
+
+https://www-sciencedirect-com.libproxy.lib.unc.edu/science/article/pii/S016953479901616X 
+
+##1.3 prey shifts
+relate those shifts to prey 
+##Grouped 
+prey grouped by order/julias groupings  
+###ECOMON:
+
+```{r}
+#now sample grid ID for ecomon table and whale table 
+ecomon_spat <- ecomon
+
+
+coordinates(ecomon_spat) <- ~ lon + lat
+ecomon_spat <- st_as_sf(ecomon_spat)
+
+ecomon_spat <- st_set_crs(ecomon_spat, 4326)
+
+
+#clip to grid
+ecomon_spat <- st_intersection(ecomon_spat,stratum) #the stratum are consistently sampled, so I think I need to calculate a stratum level mean centroid 
+ecomon_spat <- ecomon_spat %>% mutate(gridID = Name)
+
+ecomon_coords <- ecomon_spat %>% st_coordinates() 
+
+ecomon_spat <- cbind(ecomon_spat, ecomon_coords)
+
+whale_use1 <- whale_spat %>% filter(n > 17)
+
+ecomon_use <- ecomon_spat %>% filter(Region == "GOM" & year >= min(whale_use$year) & month %in% c(4,5,6))
+
+
+
+ggplot(data = world) + geom_sf()+ geom_sf(data = ecomon_use, aes(colour = as.factor(gridID))) + 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+```
+
+
+```{r}
+grids <- st_centroid(stratum) 
+
+centroids <- st_coordinates(grids)
+centroids <- cbind(grids, centroids)
+centroids <- centroids %>% rename(X_mid = X, Y_mid = Y) %>% st_drop_geometry()
+
+#group by grid cell and year to find gridded abundances 
+ecomon_long <- ecomon_use %>% pivot_longer(cols = ecomon_snames, names_to = "spp", values_to = "abd")
+
+#get out only common ones 
+spp_use <- ecomon_long %>% st_drop_geometry() %>% filter(abd > 0) %>% group_by(spp) %>% tally()
+write.csv(spp_use, "ecomon_use_nmes.csv")
+
+ecomon_types <- read.csv("ecomon_snames.csv")
+
+ecomon_long <- left_join(ecomon_long, ecomon_types, by = c("spp" = "spp_code"))
+
+ecomon_long$category <- paste(ecomon_long$additional_category, "ecomon", sep = "_")
+
+ecomon_use <- ecomon_long %>% st_drop_geometry() %>% group_by(gridID, year, spp)  %>% summarise(abd = mean(abd)) %>% drop_na()
+
+#group by julia category 
+ecomon_use <- ecomon_long %>% st_drop_geometry() %>% group_by(gridID, year, category)  %>% summarise(abd = mean(abd)) %>% drop_na()
+
+ecomon_use <- left_join(ecomon_use, centroids, by = c("gridID"= "Name"))
+
+
+ecomon_grouped <- ecomon_use %>% st_drop_geometry() %>% select(year, gridID) %>% unique %>% group_by(gridID) %>% tally() 
+
+ecomon_use <- left_join(ecomon_use, ecomon_grouped, by = "gridID")
+
+ggplot(data = world) + geom_sf()+ geom_point(data = subset(ecomon_use, ecomon_use$n >16), aes(colour = n, x = X_mid, y = Y_mid)) + 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+ecomon_use <- ecomon_use %>% filter(n==17)
+
+ecomon_use <- ecomon_use[!apply(ecomon_use, 1, function(x) any(x=="")),] 
+
+#find mean centroids of abundance (this is gridded by stratum so a bit coarse
+
+#for loop for each year 
+years <- unique(ecomon_use$year)
+specs <- unique(ecomon_use$spp)
+specs <- unique(ecomon_use$category)
+weighted_centroids <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids) <- c("X", "Y", "year", "spec")
+
+weighted_centroids_mid <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids_mid) <- c("X", "Y", "year", "spec")
+
+
+for (a in 1:length(years)){
+  year_use <- years[a]
+  use <- ecomon_use %>% filter(year %in% year_use)
+  for (i in 1:length(specs)) {tryCatch({ 
+  specs_use = specs[i]
+  use2 <- use %>% filter(category %in% specs_use)
+  ecomon_mid <- use2 
+  coordinates(ecomon_mid) <- ~ X_mid + Y_mid
+  ecomon_cent <- wt.centroid(ecomon_mid, p = "abd")
+  weighted_centroids_mid[i, 1] <- ecomon_cent@coords[1]
+  weighted_centroids_mid[i, 2] <- ecomon_cent@coords[2]
+  weighted_centroids_mid[i, 3] <- year_use
+  weighted_centroids_mid[i, 4] <- specs[i]
+  
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+  weighted_centroids <- rbind(weighted_centroids_mid, weighted_centroids)
+}
+
+#distance from stellwagen center  
+stellwagen_center <- c(-70.32125, 42.4044)
+weighted_centroids_dist <- distGeo(weighted_centroids, stellwagen_center)
+
+weighted_centroids$stellwagen_center <- weighted_centroids_dist
+
+weighted_centroids_ecomon <- weighted_centroids
+
+
+```
+
+It looks like there is something going on here with prey centroids and humpback distributions 
+
+###TRAWLS
+
+
+
+```{r}
+load("NEFSC_BTS_2021_all_seasons.RData")
+load("stratum.area.RData")
+fish_table <- survey$survdat
+#this is monthly cpue (wtcpue)
+
+# sum different sexes of same spp together
+#okay so now we know that the biomass column was given to them as the calibrated cpue
+fish_table <- fish_table %>% 
+  group_by(YEAR, SEASON, EST_TOWDATE, LAT, LON, CRUISE6, DEPTH, STATION, STRATUM, SVSPP, COMNAME) %>% 
+  dplyr::summarise(wtcpue = sum(BIOMASS), abd = sum(ABUNDANCE), BOTTEMP = mean(BOTTEMP), BOTSALIN = mean(BOTSALIN), SURFTEMP = mean(SURFTEMP), SURFSALIN = mean(SURFSALIN)) 
+
+neus_strata <- stratum.area %>% 
+  dplyr::select(STRATUM, STRATUM_AREA) %>% 
+  mutate(STRATUM = as.integer(STRATUM)) %>%
+  distinct()
+
+fish_table <-  left_join(fish_table, neus_strata, by = c("STRATUM" = "STRATUM"))
+
+fish_table <- filter(fish_table, !is.na(STRATUM_AREA))
+
+fish_table <- fish_table %>%
+  mutate(
+    # Create a unique haulid
+    haulid = paste(formatC(CRUISE6, width=6, flag=0), formatC(STATION, width=3, flag=0), formatC(STRATUM, width=4, flag=0), sep='-'),  
+    # Calculate stratum area where needed (use convex hull approach)
+    # convert square nautical miles to square kilometers
+    STRATUM_AREA = STRATUM_AREA * 3.429904) %>% 
+  dplyr::rename(year = YEAR,
+         spp = COMNAME,
+         date = EST_TOWDATE,
+         lat = LAT, 
+         lon = LON, 
+         depth = DEPTH,
+         stratum = STRATUM, 
+         stratumarea = STRATUM_AREA) %>%
+  filter(
+    # remove unidentified spp and non-species
+    spp != "" | !is.na(spp), 
+    !grepl("EGG", spp), 
+    !grepl("UNIDENTIFIED", spp)) %>%
+  group_by(haulid, stratum, stratumarea, year, date, lat, lon, depth, spp, SEASON) %>% 
+  dplyr::summarise(wtcpue = sumna(wtcpue), BT = mean(BOTTEMP), BSAL = mean(BOTSALIN), SST = mean(SURFTEMP), SSAL = mean(SURFSALIN)) %>% 
+  # add temporary region column (this will be replaced with seasonal name)
+  mutate(region = "Northeast US") %>% 
+  dplyr::select(region, haulid, year, date, lat, lon, stratum, stratumarea, depth, spp, wtcpue, SEASON, BT, SST, BSAL, SSAL) %>% 
+  ungroup()
+
+
+fish_table <- fish_table %>% 
+  drop_na(lat,lon)
+
+fish_table$month <- month(as.POSIXlt(fish_table$date))
+
+
+fish_table_wide <- pivot_wider(fish_table, names_from = spp, values_from = wtcpue)
+ #with more than 20% NA
+
+fish_table <- fish_table_wide
+
+#convert NA to 0 
+fish_table[, 15:ncol(fish_table)][is.na(fish_table[, 15:ncol(fish_table)])] <- 0
+
+colnames(fish_table) <- gsub(pattern = ' ', replacement = ".", x = colnames(fish_table))
+fish_table <- fish_table %>% dplyr::select(-SEASON)
+
+
+fish_table <- fish_table %>% 
+  drop_na(lat,lon)
+
+
+fish_spat <- fish_table
+
+
+coordinates(fish_spat) <- ~ lon + lat
+fish_spat <- st_as_sf(fish_spat)
+
+fish_spat <- st_set_crs(fish_spat, 4326)
+
+
+#clip to grid
+fish_spat <- st_intersection(fish_spat,stratum) #the stratum are consistently sampled, so I think I need to calculate a stratum level mean centroid 
+fish_spat <- fish_spat %>% mutate(gridID = Name)
+
+fish_coords <- fish_spat %>% st_coordinates() 
+
+fish_spat <- cbind(fish_spat, fish_coords)
+
+
+fish_spat <- fish_spat %>% filter(Region == "GOM" & year >= min(whale_use$year) & month %in% c(4,5,6)) #this just gets out the same area as the whale data and same months
+
+
+
+ggplot(data = world) + geom_sf()+ geom_sf(data = fish_spat, aes(colour = as.factor(gridID))) + 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+fish_use <- fish_spat
+
+```
+
+```{r}
+grids <- st_centroid(stratum) 
+
+centroids <- st_coordinates(grids)
+centroids <- cbind(grids, centroids)
+centroids <- centroids %>% rename(X_mid = X, Y_mid = Y) %>% st_drop_geometry()
+
+#group by grid cell and year to find gridded abundances 
+fish_long <- fish_use %>% pivot_longer(cols = c(FOURSPOT.FLOUNDER:PELAGIC.STINGRAY), names_to = "spp", values_to = "abd")
+
+#get out only common ones 
+spp_use <- fish_long %>% st_drop_geometry() %>% filter(abd > 0) %>% group_by(spp) %>% tally()
+
+fish_types <- read.csv("spp_use.csv")
+
+fish_long <- left_join(fish_long, fish_types, by = c("spp"))
+
+fish_use <- fish_long %>% st_drop_geometry() %>% group_by(gridID, year, spp)  %>% summarise(abd = mean(abd)) %>% drop_na()
+
+#group by category 
+fish_long$category <- paste(fish_long$other_category, "trawls", sep = "_")
+
+fish_use <- fish_long %>% st_drop_geometry() %>% group_by(gridID, year, category)  %>% summarise(abd = mean(abd)) %>% drop_na()
+
+fish_use <- left_join(fish_use, centroids, by = c("gridID"= "Name"))
+
+
+fish_grouped <- fish_use %>% st_drop_geometry() %>% select(year, gridID) %>% unique %>% group_by(gridID) %>% tally() 
+
+fish_use <- left_join(fish_use, fish_grouped, by = "gridID")
+
+ggplot(data = world) + geom_sf()+ geom_point(data = subset(fish_use, fish_use$n >16), aes(colour = n, x = X_mid, y = Y_mid)) + 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+fish_use <- fish_use %>% filter(n==17)
+
+fish_use <- fish_use[!apply(fish_use, 1, function(x) any(x=="")),] 
+
+#find mean centroids of abundance (this is gridded by stratum so a bit coarse
+
+#for loop for each year 
+years <- unique(fish_use$year)
+specs <- unique(fish_use$spp)
+specs <- unique(fish_use$category)
+weighted_centroids <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids) <- c("X", "Y", "year", "spec")
+
+weighted_centroids_mid <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids_mid) <- c("X", "Y", "year", "spec")
+
+
+for (a in 1:length(years)){
+  year_use <- years[a]
+  use <- fish_use %>% filter(year %in% year_use)
+  for (i in 1:length(specs)) {tryCatch({ 
+  specs_use = specs[i]
+  use2 <- use %>% filter(category %in% specs_use)
+  fish_mid <- use2 
+  coordinates(fish_mid) <- ~ X_mid + Y_mid
+  fish_cent <- wt.centroid(fish_mid, p = "abd")
+  weighted_centroids_mid[i, 1] <- fish_cent@coords[1]
+  weighted_centroids_mid[i, 2] <- fish_cent@coords[2]
+  weighted_centroids_mid[i, 3] <- year_use
+  weighted_centroids_mid[i, 4] <- specs[i]
+  
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+  weighted_centroids <- rbind(weighted_centroids_mid, weighted_centroids)
+}
+
+#distance from stellwagen center  
+stellwagen_center <- c(-70.32125, 42.4044)
+weighted_centroids_dist <- distGeo(weighted_centroids, stellwagen_center)
+
+weighted_centroids$stellwagen_center <- weighted_centroids_dist
+
+weighted_centroids_fish <- weighted_centroids
+
+weighted_centroids_fish <- weighted_centroids_fish %>% drop_na(spec)
+```
+
+###STOMACH
+
+```{r}
+#now sample grid ID for ecomon table and whale table 
+stom_spat <- stom
+
+
+coordinates(stom_spat) <- ~ declon + declat
+stom_spat <- st_as_sf(stom_spat)
+
+stom_spat <- st_set_crs(stom_spat, 4326)
+
+stom_spat <- st_intersection(stom_spat,stratum)
+
+stom_spat <- stom_spat %>% mutate(gridID = Name)
+
+stom_coords <- stom_spat %>% st_coordinates() 
+
+stom_spat <- cbind(stom_spat, stom_coords)
+
+stom_use <- stom_spat  %>% filter(Region == "GOM" & year >= min(whale_use$year) & month %in% c(4,5,6)) #this just gets out the same
+
+
+
+ggplot(data = world) + geom_sf()+ geom_sf(data = stom_use, aes(colour = gridID)) + 
+    coord_sf(xlim=c(-90, -20), ylim=c(20,60), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+#Make sure they are consistently sampled in all of the same 17 years 
+grouped <- stom_use %>% st_drop_geometry() %>% select(year, gridID) %>% unique %>% group_by(gridID) %>% tally() 
+
+stom_use <- left_join(stom_use, grouped, by = "gridID")
+
+ggplot() +geom_sf(data = grid) + geom_sf(data = subset(stom_use, stom_use$n > 17), aes(colour = n)) + geom_sf(data = world)+ 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+ggplot() +geom_sf(data = grid) + geom_sf(data = stom_use, aes(colour = n)) + geom_sf(data = world)+ 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+```
+Lets try it with the stomach content, same years overlapping region (not grid cells, just min and max lat/long)
+
+```{r}
+grids <- st_centroid(stratum) 
+
+centroids <- st_coordinates(grids)
+centroids <- cbind(grids, centroids)
+centroids <- centroids %>% rename(X_mid = X, Y_mid = Y) %>% st_drop_geometry()
+
+stom_use <- stom_use[!apply(stom_use, 1, function(x) any(x=="")),] #remove empty strings
+
+stom_use <- stom_use %>% st_drop_geometry() %>% dplyr::select(pyamtw, haulid, analsci, day, month, year, Region, gridID) %>% group_by(haulid, analsci, day, month, year, Region, gridID) %>% summarise(pyamtw = sum(pyamtw)) 
+#add in the zeros 
+
+stome_spread <- stom_use %>% pivot_wider(names_from = "analsci", values_from = "pyamtw")
+
+stome_spread[is.na(stome_spread)] <- 0
+
+stom_use2 <- stome_spread %>% pivot_longer(AMMODYTIDAE:CYCLOPTERIDAE, names_to = "analsci", values_to = "pyamtw")
+
+stom_use2$category <- paste(stom_use2$analsci, "stomach", sep = "_")
+
+#group by grid cell and year to find gridded abundances 
+
+stom_use2 <- stom_use2 %>% group_by(gridID, year, category)  %>% summarise(pyamtw = mean(pyamtw)) %>% drop_na()
+
+stom_use2 <- left_join(stom_use2, centroids, by = c("gridID"= "Name"))
+
+
+
+#find mean centroids of abundance (this is gridded so a bit coarse
+
+#for loop for each year 
+years <- unique(stom_use2$year)
+specs <- unique(stom_use2$category)
+weighted_centroids <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids) <- c("X", "Y", "year", "spec")
+
+weighted_centroids_mid <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids_mid) <- c("X", "Y", "year", "spec")
+
+
+for (a in 1:length(years)){
+  year_use <- years[a]
+  use <- stom_use2 %>% filter(year %in% year_use)
+  for (i in 1:length(specs)) {tryCatch({ 
+  specs_use = specs[i]
+  use2 <- use %>% filter(category %in% specs_use)
+  stom_mid <- use2 
+  coordinates(stom_mid) <- ~ X_mid + Y_mid
+  stom_cent <- wt.centroid(stom_mid, p = "pyamtw")
+  weighted_centroids_mid[i, 1] <- stom_cent@coords[1]
+  weighted_centroids_mid[i, 2] <- stom_cent@coords[2]
+  weighted_centroids_mid[i, 3] <- year_use
+  weighted_centroids_mid[i, 4] <- specs[i]
+  
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+  weighted_centroids <- rbind(weighted_centroids_mid, weighted_centroids)
+}
+
+#distance from boston 
+weighted_centroids_dist <- distGeo(weighted_centroids, stellwagen_center)
+
+weighted_centroids$stellwagen_center <- weighted_centroids_dist
+
+weighted_centroids_stom <- weighted_centroids
+
+
+ggplot(data = world) + geom_sf()+ geom_point(data = subset(weighted_centroids_stom, weighted_centroids_stom$year > 2000), aes(x = X, y = Y, colour = year)) + 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black")) 
+
+```
+###1.3.1 prey glms 
+on distance
+loop through and figure out if significant relationship between humpback and other species mean centroids 
+```{r}
+weighted_centroids_hump$spec <- "hump"
+weighted_centroids_ecomon$heatwave <-   ifelse(weighted_centroids_ecomon$year < 2013, "pre_2012_heatwave", "post_2012_heatwave")
+
+weighted_centroids_stom$heatwave <-   ifelse(weighted_centroids_stom$year < 2013, "pre_2012_heatwave", "post_2012_heatwave")
+
+weighted_centroids_fish$heatwave <-   ifelse(weighted_centroids_fish$year < 2013, "pre_2012_heatwave", "post_2012_heatwave")
+
+
+
+centroids_both <- rbind(weighted_centroids_hump, weighted_centroids_ecomon, weighted_centroids_stom, weighted_centroids_fish)
+
+centroids_both <- centroids_both %>% unique()
+
+
+centroids_wide <- centroids_both %>% select(-X, -Y) %>% pivot_wider(names_from = spec, values_from = stellwagen_center) 
+
+centroids_wide <- centroids_wide %>%  mutate(across(where(is.character), ~na_if(., "NULL")))
+
+
+#remove columns with a bunch of nas
+centroids_wide <- centroids_wide %>% select(which(colMeans(is.na(.)) < 0.2))
+
+centroids_wide <- left_join(centroids_wide, xdata_sum, by = c("year"))
+
+centroids_wide <- centroids_wide %>% drop_na(hump)
+centroids_wide_group <- centroids_wide
+```
+
+make sure I am using an okay distribution 
+
+```{r}
+
+fit <- glm(hump ~ year, data = centroids_wide)
+plot(fit)
+
+#looks like the residuals are pretty normally distributed
+```
+
+
+
+```{r}
+
+centroid_glm <- data.frame(matrix(ncol=4, nrow=1))
+colnames(centroid_glm) <- c("names", "deviance", "pvalue", "coef")
+
+xnames <- colnames(centroids_wide)
+xnames <- xnames[xnames != "hump"]
+
+for (i in 1:length(xnames)) { #for each species in spec_list
+  tryCatch({ fit <- glm(as.formula(paste("hump ~", xnames[i])), data=centroids_wide)
+  p <- summary(fit)$coefficients[2,4] 
+  dev <- 1 - (summary(fit)$deviance/summary(fit)$null.deviance)
+  centroid_glm[i,1] <- xnames[i]
+  centroid_glm[i,2] <- dev
+  centroid_glm[i,3] <- p
+  centroid_glm[i, 4] <- fit$coefficients[2]
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+
+
+
+centroid_glm$direction <- ifelse(centroid_glm$coef > 0, "positive", "negative")
+
+centroid_glm %>% top_n(deviance,n = 15) %>% 
+  mutate(names = fct_reorder(names, deviance)) %>%
+  ggplot(aes(x=names, y=deviance, fill = direction)) +
+    geom_bar(stat="identity", width=.4) +
+    coord_flip() + labs(y = "deviance ",x = element_blank())
+
+
+nam <- centroid_glm %>% top_n(deviance,n = 15) 
+names <- nam$names
+
+for (i in 1:length(names)) {
+  dat <- centroids_wide %>% select(hump, names[i])
+  colnames(dat) <- c("hump", "x")
+p <- ggplot(data = dat ,aes(x = x, y = hump)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = x, y = hump), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()+ labs(title = names[i])
+
+print(p)
+}
+
+```
+
+```{r}
+centroid_glm$cat <- ifelse(centroid_glm$names %in% c("sfc_temp", "sfc_salt", "btm_temp", "btm_salt"), "env", "prey")
+```
+
+
+```{r}
+centroid_glm %>% filter(names != "year") %>% ggplot(aes(y = deviance, x = cat, colour = cat)) + geom_boxplot() + stat_compare_means(method = "wilcox")
+```
+
+##species level 
+
+###ECOMON
+```{r}
+#now sample grid ID for ecomon table and whale table 
+ecomon_spat <- ecomon
+
+
+coordinates(ecomon_spat) <- ~ lon + lat
+ecomon_spat <- st_as_sf(ecomon_spat)
+
+ecomon_spat <- st_set_crs(ecomon_spat, 4326)
+
+
+#clip to grid
+ecomon_spat <- st_intersection(ecomon_spat,stratum) #the stratum are consistently sampled, so I think I need to calculate a stratum level mean centroid 
+ecomon_spat <- ecomon_spat %>% mutate(gridID = Name)
+
+ecomon_coords <- ecomon_spat %>% st_coordinates() 
+
+ecomon_spat <- cbind(ecomon_spat, ecomon_coords)
+
+whale_use1 <- whale_spat %>% filter(n > 17)
+
+ecomon_use <- ecomon_spat %>% filter(Region == "GOM" & year >= min(whale_use$year) & month %in% c(4,5,6))
+
+
+
+ggplot(data = world) + geom_sf()+ geom_sf(data = ecomon_use, aes(colour = as.factor(gridID))) + 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+```
+
+
+```{r}
+grids <- st_centroid(stratum) 
+
+centroids <- st_coordinates(grids)
+centroids <- cbind(grids, centroids)
+centroids <- centroids %>% rename(X_mid = X, Y_mid = Y) %>% st_drop_geometry()
+
+#group by grid cell and year to find gridded abundances 
+ecomon_long <- ecomon_use %>% pivot_longer(cols = ecomon_snames, names_to = "spp", values_to = "abd")
+
+#get out only common ones 
+spp_use <- ecomon_long %>% st_drop_geometry() %>% filter(abd > 0) %>% group_by(spp) %>% tally()
+write.csv(spp_use, "ecomon_use_nmes.csv")
+
+ecomon_types <- read.csv("ecomon_snames.csv")
+
+ecomon_long <- left_join(ecomon_long, ecomon_types, by = c("spp" = "spp_code"))
+
+ecomon_long$category <- paste(ecomon_long$sname, "ecomon", sep = "_")
+
+ecomon_use <- ecomon_long %>% st_drop_geometry() %>% group_by(gridID, year, spp)  %>% summarise(abd = mean(abd)) %>% drop_na()
+
+#group by julia category 
+ecomon_use <- ecomon_long %>% st_drop_geometry() %>% group_by(gridID, year, category)  %>% summarise(abd = mean(abd)) %>% drop_na()
+
+ecomon_use <- left_join(ecomon_use, centroids, by = c("gridID"= "Name"))
+
+
+ecomon_grouped <- ecomon_use %>% st_drop_geometry() %>% select(year, gridID) %>% unique %>% group_by(gridID) %>% tally() 
+
+ecomon_use <- left_join(ecomon_use, ecomon_grouped, by = "gridID")
+
+ggplot(data = world) + geom_sf()+ geom_point(data = subset(ecomon_use, ecomon_use$n >16), aes(colour = n, x = X_mid, y = Y_mid)) + 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+ecomon_use <- ecomon_use %>% filter(n==17)
+
+ecomon_use <- ecomon_use[!apply(ecomon_use, 1, function(x) any(x=="")),] 
+
+#find mean centroids of abundance (this is gridded by stratum so a bit coarse
+
+#for loop for each year 
+years <- unique(ecomon_use$year)
+specs <- unique(ecomon_use$spp)
+specs <- unique(ecomon_use$category)
+weighted_centroids <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids) <- c("X", "Y", "year", "spec")
+
+weighted_centroids_mid <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids_mid) <- c("X", "Y", "year", "spec")
+
+
+for (a in 1:length(years)){
+  year_use <- years[a]
+  use <- ecomon_use %>% filter(year %in% year_use)
+  for (i in 1:length(specs)) {tryCatch({ 
+  specs_use = specs[i]
+  use2 <- use %>% filter(category %in% specs_use)
+  ecomon_mid <- use2 
+  coordinates(ecomon_mid) <- ~ X_mid + Y_mid
+  ecomon_cent <- wt.centroid(ecomon_mid, p = "abd")
+  weighted_centroids_mid[i, 1] <- ecomon_cent@coords[1]
+  weighted_centroids_mid[i, 2] <- ecomon_cent@coords[2]
+  weighted_centroids_mid[i, 3] <- year_use
+  weighted_centroids_mid[i, 4] <- specs[i]
+  
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+  weighted_centroids <- rbind(weighted_centroids_mid, weighted_centroids)
+}
+
+#distance from stellwagen center  
+stellwagen_center <- c(-70.32125, 42.4044)
+weighted_centroids_dist <- distGeo(weighted_centroids, stellwagen_center)
+
+weighted_centroids$stellwagen_center <- weighted_centroids_dist
+
+weighted_centroids_ecomon <- weighted_centroids
+
+
+```
+
+It looks like there is something going on here with prey centroids and humpback distributions 
+
+###TRAWLS
+
+
+
+```{r}
+load("NEFSC_BTS_2021_all_seasons.RData")
+load("stratum.area.RData")
+fish_table <- survey$survdat
+#this is monthly cpue (wtcpue)
+
+# sum different sexes of same spp together
+#okay so now we know that the biomass column was given to them as the calibrated cpue
+fish_table <- fish_table %>% 
+  group_by(YEAR, SEASON, EST_TOWDATE, LAT, LON, CRUISE6, DEPTH, STATION, STRATUM, SVSPP, COMNAME) %>% 
+  dplyr::summarise(wtcpue = sum(BIOMASS), abd = sum(ABUNDANCE), BOTTEMP = mean(BOTTEMP), BOTSALIN = mean(BOTSALIN), SURFTEMP = mean(SURFTEMP), SURFSALIN = mean(SURFSALIN)) 
+
+neus_strata <- stratum.area %>% 
+  dplyr::select(STRATUM, STRATUM_AREA) %>% 
+  mutate(STRATUM = as.integer(STRATUM)) %>%
+  distinct()
+
+fish_table <-  left_join(fish_table, neus_strata, by = c("STRATUM" = "STRATUM"))
+
+fish_table <- filter(fish_table, !is.na(STRATUM_AREA))
+
+fish_table <- fish_table %>%
+  mutate(
+    # Create a unique haulid
+    haulid = paste(formatC(CRUISE6, width=6, flag=0), formatC(STATION, width=3, flag=0), formatC(STRATUM, width=4, flag=0), sep='-'),  
+    # Calculate stratum area where needed (use convex hull approach)
+    # convert square nautical miles to square kilometers
+    STRATUM_AREA = STRATUM_AREA * 3.429904) %>% 
+  dplyr::rename(year = YEAR,
+         spp = COMNAME,
+         date = EST_TOWDATE,
+         lat = LAT, 
+         lon = LON, 
+         depth = DEPTH,
+         stratum = STRATUM, 
+         stratumarea = STRATUM_AREA) %>%
+  filter(
+    # remove unidentified spp and non-species
+    spp != "" | !is.na(spp), 
+    !grepl("EGG", spp), 
+    !grepl("UNIDENTIFIED", spp)) %>%
+  group_by(haulid, stratum, stratumarea, year, date, lat, lon, depth, spp, SEASON) %>% 
+  dplyr::summarise(wtcpue = sumna(wtcpue), BT = mean(BOTTEMP), BSAL = mean(BOTSALIN), SST = mean(SURFTEMP), SSAL = mean(SURFSALIN)) %>% 
+  # add temporary region column (this will be replaced with seasonal name)
+  mutate(region = "Northeast US") %>% 
+  dplyr::select(region, haulid, year, date, lat, lon, stratum, stratumarea, depth, spp, wtcpue, SEASON, BT, SST, BSAL, SSAL) %>% 
+  ungroup()
+
+
+fish_table <- fish_table %>% 
+  drop_na(lat,lon)
+
+fish_table$month <- month(as.POSIXlt(fish_table$date))
+
+
+fish_table_wide <- pivot_wider(fish_table, names_from = spp, values_from = wtcpue)
+ #with more than 20% NA
+
+fish_table <- fish_table_wide
+
+#convert NA to 0 
+fish_table[, 15:ncol(fish_table)][is.na(fish_table[, 15:ncol(fish_table)])] <- 0
+
+colnames(fish_table) <- gsub(pattern = ' ', replacement = ".", x = colnames(fish_table))
+fish_table <- fish_table %>% dplyr::select(-SEASON)
+
+
+fish_table <- fish_table %>% 
+  drop_na(lat,lon)
+
+
+fish_spat <- fish_table
+
+
+coordinates(fish_spat) <- ~ lon + lat
+fish_spat <- st_as_sf(fish_spat)
+
+fish_spat <- st_set_crs(fish_spat, 4326)
+
+
+#clip to grid
+fish_spat <- st_intersection(fish_spat,stratum) #the stratum are consistently sampled, so I think I need to calculate a stratum level mean centroid 
+fish_spat <- fish_spat %>% mutate(gridID = Name)
+
+fish_coords <- fish_spat %>% st_coordinates() 
+
+fish_spat <- cbind(fish_spat, fish_coords)
+
+
+fish_spat <- fish_spat %>% filter(Region == "GOM" & year >= min(whale_use$year) & month %in% c(4,5,6)) #this just gets out the same area as the whale data and same months
+
+
+
+ggplot(data = world) + geom_sf()+ geom_sf(data = fish_spat, aes(colour = as.factor(gridID))) + 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+fish_use <- fish_spat
+
+```
+
+```{r}
+grids <- st_centroid(stratum) 
+
+centroids <- st_coordinates(grids)
+centroids <- cbind(grids, centroids)
+centroids <- centroids %>% rename(X_mid = X, Y_mid = Y) %>% st_drop_geometry()
+
+#group by grid cell and year to find gridded abundances 
+fish_long <- fish_use %>% pivot_longer(cols = c(FOURSPOT.FLOUNDER:PELAGIC.STINGRAY), names_to = "spp", values_to = "abd")
+
+#get out only common ones 
+spp_use <- fish_long %>% st_drop_geometry() %>% filter(abd > 0) %>% group_by(spp) %>% tally()
+
+fish_types <- read.csv("spp_by_year_selected.csv")
+fish_types$COMNAME <- gsub(pattern = ' ', replacement = ".", x = fish_types$COMNAME)
+
+fish_long <- left_join(fish_long, fish_types, by = c("spp" = "COMNAME"))
+
+fish_use <- fish_long %>% st_drop_geometry() %>% group_by(gridID, year, spp)  %>% summarise(abd = mean(abd)) %>% drop_na()
+
+#group by category 
+fish_long$category <- paste(fish_long$spp, "trawls", sep = "_")
+
+fish_use <- fish_long %>% st_drop_geometry() %>% group_by(gridID, year, category)  %>% summarise(abd = mean(abd)) %>% drop_na()
+
+fish_use <- left_join(fish_use, centroids, by = c("gridID"= "Name"))
+
+
+fish_grouped <- fish_use %>% st_drop_geometry() %>% select(year, gridID) %>% unique %>% group_by(gridID) %>% tally() 
+
+fish_use <- left_join(fish_use, fish_grouped, by = "gridID")
+
+ggplot(data = world) + geom_sf()+ geom_point(data = subset(fish_use, fish_use$n >16), aes(colour = n, x = X_mid, y = Y_mid)) + 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+fish_use <- fish_use %>% filter(n==17)
+
+fish_use <- fish_use[!apply(fish_use, 1, function(x) any(x=="")),] 
+
+#find mean centroids of abundance (this is gridded by stratum so a bit coarse
+
+#for loop for each year 
+years <- unique(fish_use$year)
+specs <- unique(fish_use$spp)
+specs <- unique(fish_use$category)
+weighted_centroids <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids) <- c("X", "Y", "year", "spec")
+
+weighted_centroids_mid <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids_mid) <- c("X", "Y", "year", "spec")
+
+
+for (a in 1:length(years)){
+  year_use <- years[a]
+  use <- fish_use %>% filter(year %in% year_use)
+  for (i in 1:length(specs)) {tryCatch({ 
+  specs_use = specs[i]
+  use2 <- use %>% filter(category %in% specs_use)
+  fish_mid <- use2 
+  coordinates(fish_mid) <- ~ X_mid + Y_mid
+  fish_cent <- wt.centroid(fish_mid, p = "abd")
+  weighted_centroids_mid[i, 1] <- fish_cent@coords[1]
+  weighted_centroids_mid[i, 2] <- fish_cent@coords[2]
+  weighted_centroids_mid[i, 3] <- year_use
+  weighted_centroids_mid[i, 4] <- specs[i]
+  
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+  weighted_centroids <- rbind(weighted_centroids_mid, weighted_centroids)
+}
+
+#distance from stellwagen center  
+stellwagen_center <- c(-70.32125, 42.4044)
+weighted_centroids_dist <- distGeo(weighted_centroids, stellwagen_center)
+
+weighted_centroids$stellwagen_center <- weighted_centroids_dist
+
+weighted_centroids_fish <- weighted_centroids
+
+weighted_centroids_fish <- weighted_centroids_fish %>% drop_na(spec)
+```
+
+###STOMACH
+
+```{r}
+#now sample grid ID for ecomon table and whale table 
+stom_spat <- stom
+
+
+coordinates(stom_spat) <- ~ declon + declat
+stom_spat <- st_as_sf(stom_spat)
+
+stom_spat <- st_set_crs(stom_spat, 4326)
+
+stom_spat <- st_intersection(stom_spat,stratum)
+
+stom_spat <- stom_spat %>% mutate(gridID = Name)
+
+stom_coords <- stom_spat %>% st_coordinates() 
+
+stom_spat <- cbind(stom_spat, stom_coords)
+
+stom_use <- stom_spat  %>% filter(Region == "GOM" & year >= min(whale_use$year) & month %in% c(4,5,6)) #this just gets out the same
+
+
+
+ggplot(data = world) + geom_sf()+ geom_sf(data = stom_use, aes(colour = gridID)) + 
+    coord_sf(xlim=c(-90, -20), ylim=c(20,60), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+#Make sure they are consistently sampled in all of the same 17 years 
+grouped <- stom_use %>% st_drop_geometry() %>% select(year, gridID) %>% unique %>% group_by(gridID) %>% tally() 
+
+stom_use <- left_join(stom_use, grouped, by = "gridID")
+
+ggplot() +geom_sf(data = grid) + geom_sf(data = subset(stom_use, stom_use$n > 17), aes(colour = n)) + geom_sf(data = world)+ 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+ggplot() +geom_sf(data = grid) + geom_sf(data = stom_use, aes(colour = n)) + geom_sf(data = world)+ 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+```
+Lets try it with the stomach content, same years overlapping region (not grid cells, just min and max lat/long)
+
+```{r}
+grids <- st_centroid(stratum) 
+
+centroids <- st_coordinates(grids)
+centroids <- cbind(grids, centroids)
+centroids <- centroids %>% rename(X_mid = X, Y_mid = Y) %>% st_drop_geometry()
+
+stom_use <- stom_use[!apply(stom_use, 1, function(x) any(x=="")),] #remove empty strings
+
+stom_use <- stom_use %>% st_drop_geometry() %>% dplyr::select(pyamtw, haulid, pynam, day, month, year, Region, gridID) %>% group_by(haulid, pynam, day, month, year, Region, gridID) %>% summarise(pyamtw = sum(pyamtw)) 
+#add in the zeros 
+stom_use$pynam <- gsub(pattern = ' ', replacement = "_", stom_use$pynam)
+
+stome_spread <- stom_use %>% pivot_wider(names_from = "pynam", values_from = "pyamtw")
+
+stome_spread[is.na(stome_spread)] <- 0
+
+stom_use2 <- stome_spread %>% pivot_longer(AMMODYTES_SP:STRING, names_to = "pynam", values_to = "pyamtw")
+
+stom_use2$category <- paste(stom_use2$pynam, "stomach", sep = "_")
+
+#group by grid cell and year to find gridded abundances 
+
+stom_use2 <- stom_use2 %>% group_by(gridID, year, category)  %>% summarise(pyamtw = mean(pyamtw)) %>% drop_na()
+
+stom_use2 <- left_join(stom_use2, centroids, by = c("gridID"= "Name"))
+
+
+
+#find mean centroids of abundance (this is gridded so a bit coarse
+
+#for loop for each year 
+years <- unique(stom_use2$year)
+specs <- unique(stom_use2$category)
+weighted_centroids <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids) <- c("X", "Y", "year", "spec")
+
+weighted_centroids_mid <- data.frame(matrix(nrow =1, ncol = 4))
+colnames(weighted_centroids_mid) <- c("X", "Y", "year", "spec")
+
+
+for (a in 1:length(years)){
+  year_use <- years[a]
+  use <- stom_use2 %>% filter(year %in% year_use)
+  for (i in 1:length(specs)) {tryCatch({ 
+  specs_use = specs[i]
+  use2 <- use %>% filter(category %in% specs_use)
+  stom_mid <- use2 
+  coordinates(stom_mid) <- ~ X_mid + Y_mid
+  stom_cent <- wt.centroid(stom_mid, p = "pyamtw")
+  weighted_centroids_mid[i, 1] <- stom_cent@coords[1]
+  weighted_centroids_mid[i, 2] <- stom_cent@coords[2]
+  weighted_centroids_mid[i, 3] <- year_use
+  weighted_centroids_mid[i, 4] <- specs[i]
+  
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+  weighted_centroids <- rbind(weighted_centroids_mid, weighted_centroids)
+}
+
+#distance from boston 
+weighted_centroids_dist <- distGeo(weighted_centroids, stellwagen_center)
+
+weighted_centroids$stellwagen_center <- weighted_centroids_dist
+
+weighted_centroids_stom <- weighted_centroids
+
+
+ggplot(data = world) + geom_sf()+ geom_point(data = subset(weighted_centroids_stom, weighted_centroids_stom$year > 2000), aes(x = X, y = Y, colour = year)) + 
+    coord_sf(xlim=c(-80, -60), ylim=c(40,50), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black")) 
+
+```
+###1.3.1 prey glms 
+on distance
+loop through and figure out if significant relationship between humpback and other species mean centroids 
+```{r}
+weighted_centroids_hump$spec <- "hump"
+weighted_centroids_ecomon$heatwave <-   ifelse(weighted_centroids_ecomon$year < 2013, "pre_2012_heatwave", "post_2012_heatwave")
+
+weighted_centroids_stom$heatwave <-   ifelse(weighted_centroids_stom$year < 2013, "pre_2012_heatwave", "post_2012_heatwave")
+
+weighted_centroids_fish$heatwave <-   ifelse(weighted_centroids_fish$year < 2013, "pre_2012_heatwave", "post_2012_heatwave")
+
+
+
+centroids_both <- rbind(weighted_centroids_hump, weighted_centroids_ecomon, weighted_centroids_stom, weighted_centroids_fish)
+
+centroids_both <- centroids_both %>% unique()
+
+
+centroids_wide <- centroids_both %>% select(-X, -Y) %>% pivot_wider(names_from = spec, values_from = stellwagen_center) 
+
+centroids_wide <- centroids_wide %>%  mutate(across(where(is.character), ~na_if(., "NULL")))
+
+
+#remove columns with a bunch of nas
+centroids_wide <- centroids_wide %>% select(which(colMeans(is.na(.)) < 0.2))
+
+centroids_wide <- left_join(centroids_wide, xdata_sum, by = c("year"))
+
+centroids_wide <- centroids_wide %>% drop_na(hump)
+```
+
+make sure I am using an okay distribution 
+
+```{r}
+
+fit <- glm(hump ~ year, data = centroids_wide)
+plot(fit)
+
+#looks like the residuals are pretty normally distributed
+```
+
+
+
+```{r}
+
+centroid_glm <- data.frame(matrix(ncol=4, nrow=1))
+colnames(centroid_glm) <- c("names", "deviance", "pvalue", "coef")
+
+xnames <- colnames(centroids_wide)
+xnames <- xnames[xnames != "hump"]
+
+for (i in 1:length(xnames)) { #for each species in spec_list
+  tryCatch({ fit <- glm(as.formula(paste("hump ~", xnames[i])), data=centroids_wide)
+  p <- summary(fit)$coefficients[2,4] 
+  dev <- 1 - (summary(fit)$deviance/summary(fit)$null.deviance)
+  centroid_glm[i,1] <- xnames[i]
+  centroid_glm[i,2] <- dev
+  centroid_glm[i,3] <- p
+  centroid_glm[i, 4] <- fit$coefficients[2]
+}, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+
+
+
+
+centroid_glm$direction <- ifelse(centroid_glm$coef > 0, "positive", "negative")
+
+centroid_glm %>% top_n(deviance,n = 15) %>% 
+  mutate(names = fct_reorder(names, deviance)) %>%
+  ggplot(aes(x=names, y=deviance, fill = direction)) +
+    geom_bar(stat="identity", width=.4) +
+    coord_flip() + labs(y = "deviance ",x = element_blank())+ scale_fill_manual(values = c("light blue", "orange"))
+
+
+nam <- centroid_glm %>% top_n(deviance,n = 15) 
+names <- nam$names
+
+for (i in 1:length(names)) {
+  dat <- centroids_wide %>% select(hump, names[i])
+  colnames(dat) <- c("hump", "x")
+p <- ggplot(data = dat ,aes(x = x, y = hump)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = x, y = hump), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()+ labs(title = names[i])
+
+print(p)
+}
+
+```
+
+```{r}
+centroid_glm$cat <- ifelse(centroid_glm$names %in% c("sfc_temp", "sfc_salt", "btm_temp", "btm_salt"), "env", "prey")
+```
+
+
+```{r}
+centroid_glm %>% filter(names != "year") %>% ggplot(aes(y = deviance, x = cat, colour = cat)) + geom_boxplot() + stat_compare_means(method = "wilcox")
+```
+
+##1.4 Environment 
+
+####1.4.1 NAO AMO 
+start with the NAO and AMO 
+
+```{r}
+NAO <- read.csv("climatologies/NAO.csv")
+AMO <- read.csv("climatologies/AMO_uns.csv")
+AtlTri <- read.csv("climatologies/AtlTri.csv")
+
+NAO <- NAO %>%
+   mutate(NAO_average = rowMeans(across(X1:X12))) %>% select(Year,NAO_average) 
+
+AMO <- AMO %>%
+   mutate(AMO_average = rowMeans(across(X1:X12)))  %>% select(Year,AMO_average) 
+
+AtlTri <- AtlTri %>%
+   mutate(AtlTri_average = rowMeans(across(X1:X12))) %>% select(Year,AtlTri_average) 
+
+weighted_centroids_hump <- left_join(weighted_centroids_hump, NAO, by = c("year" = "Year"))
+
+weighted_centroids_hump <- left_join(weighted_centroids_hump, AMO, by = c("year" = "Year"))
+weighted_centroids_hump <- left_join(weighted_centroids_hump, AtlTri, by = c("year" = "Year"))
+
+
+```
+
+
+```{r}
+ggplot(data = weighted_centroids_hump ,aes(x = NAO_average, y = Y)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = NAO_average, y = Y), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+ggplot(data = weighted_centroids_hump ,aes(x = NAO_average, y = boston)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = NAO_average, y = boston), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+ggplot(data = weighted_centroids_hump ,aes(x = AMO_average, y = Y)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = AMO_average, y = Y), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+ggplot(data = weighted_centroids_hump ,aes(x = AMO_average, y = boston)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = AMO_average, y = boston), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+
+#take out earlier years 
+ggplot(data = subset(weighted_centroids_hump,weighted_centroids_hump$year > 2002)  ,aes(x = NAO_average, y = Y)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = NAO_average, y = Y), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+ggplot(data = subset(weighted_centroids_hump,weighted_centroids_hump$year > 2002) ,aes(x = NAO_average, y = boston)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = NAO_average, y = boston), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+ggplot(data = subset(weighted_centroids_hump,weighted_centroids_hump$year > 2002) ,aes(x = AMO_average, y = Y)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = AMO_average, y = Y), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+ggplot(data = subset(weighted_centroids_hump,weighted_centroids_hump$year > 2002) ,aes(x = AMO_average, y = boston)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = AMO_average, y = boston), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+```
+
+Those aren't really explaining much 
+
+####1.4.2 Average env variables 
+add in OISST temperature 
+
+Lets just take from the trawl data because I know that has  a lot already in it 
+```{r}
+xdata <- ecomon
+
+```
+
+```{r}
+#take gulf of maine seasonal temps (overlapping months with the whales)
+
+xdata <- xdata %>% filter(month %in% c(4, 5, 6)) 
+xdata_spat <- xdata 
+
+coordinates(xdata_spat) <- ~ lon + lat
+xdata_spat <- st_as_sf(xdata_spat)
+
+xdata_spat <- st_set_crs(xdata_spat, 4326)
+
+xdata_spat <- st_intersection(xdata_spat,stratum)
+
+xdata_coords <- xdata_spat %>% st_coordinates() 
+
+xdata_spat <- cbind(xdata_spat, xdata_coords)
+
+
+ggplot(data = world) + geom_sf()+ geom_sf(data = xdata_spat, aes(colour = Region), size = .2) + 
+    coord_sf(xlim=c(-90, -60), ylim=c(35,55), expand = TRUE) + theme(panel.background = element_rect(fill = "white", colour = "black"))
+
+
+use_years <- whale_use %>% ungroup() %>% select(year) %>% unique()
+use_years <- as.vector(use_years$year)
+
+#xdata_use <- xdata_spat %>% filter(est_year >= min(whale_use$year))
+xdata_use <- xdata_spat %>% filter(year %in% use_years & Region == "GOM")
+
+
+```
+take the average annual temp and salinity of those grid cells 
+```{r}
+xdata_sum <- xdata_use %>% st_drop_geometry() %>% group_by(year) %>%  summarise_at(c("sfc_temp", "sfc_salt", "btm_temp", "btm_salt"), mean, na.rm = TRUE)
+```
+
+```{r}
+weighted_centroids_hump <- left_join(weighted_centroids_hump, xdata_sum, by = c("year" = "year"))
+
+
+```
+
+
+
+make a long dataframe to show all of the env. variable relationships at once 
+```{r}
+centroids_long <- weighted_centroids_hump %>% pivot_longer(cols = c(NAO_average:btm_salt), names_to = "env_var", values_to = "env_val")
+
+centroids_long %>% ggplot(aes(x = env_val, y = boston)) + geom_point() + facet_wrap(~env_var, scales = "free_x")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+```
+
+
+
+####1.4.3 climate velocity 
+
+```{r}
+remotes::install_github("jebyrnes/hadsstR")
+
+library(hadsstr)
+
+
+```
+
+
+```{r}
+library(maptools)
+data(wrld_simpl)
+library(raster)
+
+HadiSST <- load_hadsst(file = "HadISST_sst.nc")
+rasts <- get_all_rasters(HadiSST, years = 1997:2018)
+
+velocity <- select_raster(rasts, "velocity_magnitude")
+
+e <- extent(-160,10,30,60)
+rasts1 <- crop(rasts, extent(-72,-68,41,43))
+
+cuts=c(-50, -25, 0,25,50,100,150,200, 250) #set breaks
+pal <- colorRampPalette(c("lightblue","red"))
+plot(rasts1$velocity_magnitude, xlim=c(-75,-65), ylim=c(40,45), axes=TRUE, main = "climate velocity (km/year)", breaks=cuts, col = pal(8))
+plot(wrld_simpl, add=TRUE)
+
+pal <- colorRampPalette(c("darkblue", "lightblue", "red", "darkred"))
+cuts=c(-1,-.5, -.25, -.1, 0,.25, .5,.75, 1) #set breaks
+plot(rasts1$linear_change, xlim=c(-75,-65), ylim=c(40,45), axes=TRUE, main = "linear change (deg C)", breaks=cuts, col = pal(9))
+plot(wrld_simpl, add=TRUE)
+
+
+
+points(subset(dolph_extract_2, dolph_extract_2$AbdPerArea > 0))
+
+ggplot(data = world) + geom_sf() + geom_raster(data = rasts1$velocity_magnitude)+ 
+    coord_sf(xlim=c(-80, -72), ylim=c(32,38), expand = TRUE)+ theme(panel.background = element_rect(fill = "white", colour = "black"))
+  
+  geom_point(data = subset(dolph_extract_2, dolph_extract_2$AbdPerArea > 0), aes(x = coords.x1, y = coords.x2, colour = AbdPerArea))  + facet_wrap(~Year_) +  scale_colour_gradientn(colours = c("yellow", "red", "darkred"))
+
+```
+
+
+#Timing of peak abundance in GOM 
+only use consistently sampled spatial area - find mean_ct of their abundance - is it earlier or later? 
+```{r}
+whale <- read.table("whale_data/baleen_segments.txt", header = TRUE)
+whale <- whale %>% dplyr::filter(ModelID == 28) #humpback 
+
+whale$date <- as.Date(whale$StartTime, format = "%m/%d/%Y")
+whale <- whale %>% mutate(day = day(date), month = month(date), year = year(date), week = week(date))
+
+
+#now sample grid ID for whale table and whale table 
+whale_spat <- whale
+
+
+coordinates(whale_spat) <- ~ X_mid + Y_mid
+whale_spat <- st_as_sf(whale_spat)
+
+whale_spat <- st_set_crs(whale_spat, 4326)
+
+whale_spat <- st_intersection(whale_spat,stratum)
+#whale_extract <- st_join(whale_spat, stratum, join = st_nearest_feature)
+
+ggplot()  + geom_sf(data = world)  + geom_sf(data = whale_spat, aes(colour = as.factor(Region))) +
+    coord_sf(xlim=c(-90, -50), ylim=c(30,50), expand = TRUE)
+```
+
+```{r}
+whale_gom <- whale_spat %>% st_drop_geometry() %>% filter(Region == "GOM")
+
+whale_gom %>% ggplot(aes(x = month, fill = factor(month))) + geom_histogram(stat = "count") + facet_wrap(~ year)
+
+#whale_gom <- whale_gom %>% filter(month == 4 | month == 5 & year != 2013)
+
+whale_gom %>% ggplot(aes(x = month, fill = factor(month))) + geom_histogram(stat = "count") + facet_wrap(~ year)
+
+
+#what is their peak timing of surveyed abundance each year?
+whale_gom$jd <- yday(whale_gom$date)
+whale_gom$week <- week(whale_gom$date)
+whale_gom$week2 <- ifelse(whale_gom$week == 15 | whale_gom$week == 16, 15, ifelse(whale_gom$week == 17 | whale_gom$week == 18, 17, ifelse(whale_gom$week == 19 | whale_gom$week == 20, 19, ifelse(whale_gom$week == 21 | whale_gom$week == 22, 21, NA))))
+
+whale_gom$AbdPerArea <- whale_gom$Individu_1/whale_gom$SegmentAre
+
+#only get out days that were sampled every year 
+weeks_use <- whale_gom %>% select(year, week2, AbdPerArea)  %>% group_by(year,week2) %>% summarise(AbdPerArea = mean(AbdPerArea))
+weeks_use <- weeks_use %>% pivot_wider(names_from = "week2", values_from = AbdPerArea)
+
+
+
+
+#only use those consistently sampled 2-week periods 
+whale_gom <- whale_gom %>% ungroup() %>% drop_na(week2) %>% filter(!year %in% c(1999, 2002, 2010, 2011, 2012, 2013))
+
+whale_gom %>% ggplot(aes(x = week2, fill = factor(month))) + geom_histogram(stat = "count") + facet_wrap(~ year)
+
+whale_ct <- whale_gom %>% mutate(mx = week2*AbdPerArea)
+
+whale_ct <- whale_ct %>% ungroup %>% group_by(year) %>% mutate(ct = (sum(mx))/(sum(AbdPerArea)), avg_abd = mean(AbdPerArea), sum_abd = sum(AbdPerArea))
+
+whale_ct <- whale_ct %>% select(year, ct, avg_abd, sum_abd) %>% unique()
+
+
+#whale_ct$ct_day <- whale_ct$ct - 31 - 29 - 31
+
+whale_ct %>% ggplot(aes(x = year, y = ct)) + geom_point() + labs(y = "Central tendency of abundance (two-week period)", main = "Gulf of Maine")+ geom_smooth(aes(x = year, y = ct), method = "loess", colour = "blue")
+```
+is this related to prey at all - what about the environment? 
+
+```{r}
+whale_ct <- left_join(whale_ct, NAO, by = c("year" = "Year"))
+
+whale_ct <- left_join(whale_ct, AMO, by = c("year" = "Year"))
+whale_ct <- left_join(whale_ct, AtlTri, by = c("year" = "Year"))
+
+```
+
+
+```{r}
+ggplot(data = whale_ct ,aes(x = NAO_average, y = ct_day)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = NAO_average, y = ct_day), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+
+ggplot(data = whale_ct ,aes(x = AMO_average, y = ct_day)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = AMO_average, y = ct_day), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+```
+
+```{r}
+#now sample grid ID for ecomon table and whale table 
+xdata_spat <- xdata
+
+
+coordinates(xdata_spat) <- ~ decdeg_beglon + decdeg_beglat
+xdata_spat <- st_as_sf(xdata_spat)
+
+xdata_spat <- st_set_crs(xdata_spat, 4326)
+
+xdata_spat <- st_intersection(xdata_spat,stratum)
+
+xdata_coords <- xdata_spat %>% st_coordinates() 
+
+xdata_spat <- cbind(xdata_spat, xdata_coords)
+
+#xdata_use <- xdata_spat %>% filter(est_year >= min(whale_use$year))
+xdata_use <- xdata_spat %>% filter(Region == "GOM")
+
+
+
+```
+take the average annual temp and salinity of those grid cells 
+```{r}
+xdata_sum <- xdata_use %>% st_drop_geometry() %>% group_by(est_year) %>%  summarise_at(c("surftemp", "surfsalin", "bottemp", "botsalin"), mean, na.rm = TRUE)
+```
+
+```{r}
+whale_ct <- left_join(whale_ct, xdata_sum, by = c("year" = "est_year"))
+
+
+```
+
+```{r}
+ggplot(data = whale_ct ,aes(x = surftemp, y = ct_day)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = surftemp, y = ct_day), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+
+ggplot(data = whale_ct ,aes(x = bottemp, y = ct_day)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = bottemp, y = ct_day), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+ggplot(data = whale_ct ,aes(x = surfsalin, y = ct_day)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = surfsalin, y = ct_day), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+
+ggplot(data = whale_ct ,aes(x = botsalin, y = ct_day)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = botsalin, y = ct_day), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+```
+interesting - the timing is related to salinity which is probably related to prey 
+
+```{r}
+#now sample grid ID for whale table and whale table 
+stom_spat <- stom
+
+
+coordinates(stom_spat) <- ~ declon + declat
+stom_spat <- st_as_sf(stom_spat)
+
+stom_spat <- st_set_crs(stom_spat, 4326)
+
+stom_spat <- st_intersection(stom_spat,stratum)
+#stom_extract <- st_join(stom_spat, stratum, join = st_nearest_feature)
+
+ggplot()  + geom_sf(data = world)  + geom_sf(data = stom_spat, aes(colour = as.factor(Region))) +
+    coord_sf(xlim=c(-90, -50), ylim=c(30,50), expand = TRUE)
+```
+
+```{r}
+stom_gom <- stom_spat %>% st_drop_geometry() %>% filter(Region == "GOM")
+
+stom_gom %>% ggplot(aes(x = month, fill = factor(month))) + geom_histogram(stat = "count") + facet_wrap(~ year)
+
+stom_gom <- stom_gom %>% filter(month == 4  & year != 2016)
+
+stom_gom %>% ggplot(aes(x = month, fill = factor(month))) + geom_histogram(stat = "count") + facet_wrap(~ year)
+
+stom_gom <- stom_gom %>% mutate(date = make_date(year, month, day))
+#what is their peak timing of abundance each year?
+stom_gom$jd <- yday(stom_gom$date)
+
+stom_ct <- stom_gom %>% mutate(mx = jd*pyamtw)
+
+stom_ct <- stom_ct %>% ungroup %>% group_by(year, analsci) %>% mutate(ct = (sum(mx))/(sum(pyamtw)), avg_abd = mean(pyamtw), sum_abd = sum(pyamtw))
+
+stom_ct <- stom_ct %>% select(year, analsci, ct, avg_abd, sum_abd) %>% unique()
+
+
+stom_ct$ct_day <- stom_ct$ct - 31 - 29 - 31
+
+stom_ct %>% ggplot(aes(x = year, y = ct_day)) + geom_point() + labs(y = "Spring central tendency of abundance (April 1 - May 31)", main = "Gulf of Maine")+ geom_smooth(aes(x = year, y = ct_day), method = "loess", colour = "blue")
+
+
+sand_ct <- stom_ct %>% filter(analsci == "AMMODYTIDAE")
+```
+
+```{r}
+whale_ct <- left_join(whale_ct, sand_ct, by = c("year"))
+
+
+```
+
+```{r}
+ggplot(data = whale_ct ,aes(x = ct_day.x, y = ct_day.y)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = ct_day.x, y = ct_day.y), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+```
+
+
+ecomon 
+
+```{r}
+#now sample grid ID for whale table and whale table 
+ecomon$season <- ifelse(ecomon$month == 1 | ecomon$month == 2, "JanFeb", ifelse(ecomon$month == 3 | ecomon$month == 4, "MarApril",ifelse(ecomon$month == 5 | ecomon$month == 6, "MayJun",ifelse(ecomon$month == 7 | ecomon$month == 8, "JulAug",ifelse(ecomon$month == 9 | ecomon$month == 10, "SepOct",ifelse(ecomon$month == 11 | ecomon$month == 12, "NovDec", NA))))))
+
+ecomon$month_proxy <- ifelse(ecomon$season == "JanFeb", 1, ifelse(ecomon$season == "MarApril", 2,ifelse( ecomon$season == "MayJun",3, ifelse(ecomon$season == "JulAug",4, ifelse(ecomon$season == "SepOct", 5,ifelse(ecomon$season == "NovDec", 6, NA))))))
+
+
+ecomon_spat <- ecomon
+
+
+coordinates(ecomon_spat) <- ~ lon + lat
+ecomon_spat <- st_as_sf(ecomon_spat)
+
+ecomon_spat <- st_set_crs(ecomon_spat, 4326)
+
+ecomon_spat <- st_intersection(ecomon_spat,stratum)
+#ecomon_extract <- st_join(ecomon_spat, stratum, join = st_nearest_feature)
+
+ggplot()  + geom_sf(data = world)  + geom_sf(data = ecomon_spat, aes(colour = as.factor(Region))) +
+    coord_sf(xlim=c(-90, -50), ylim=c(30,50), expand = TRUE)
+```
+
+```{r}
+ecomon_gom <- ecomon_spat %>% st_drop_geometry() %>% filter(Region == "GOM")
+
+
+
+ecomon_gom %>% ggplot(aes(x = month_proxy, fill = factor(month_proxy))) + geom_histogram(stat = "count") + facet_wrap(~ year)
+
+ecomon_gom <- ecomon_gom %>% filter(year > 2000) %>% filter(year!= 2016 & year !=2018)
+ecomon_gom %>% ggplot(aes(x = month_proxy, fill = factor(month_proxy))) + geom_histogram(stat = "count") + facet_wrap(~ year)
+
+ecomon_gom <- ecomon_gom %>% filter(month_proxy == 2 | month_proxy == 3)
+
+ecomon_gom <- ecomon_gom %>% mutate(date = make_date(year, month, day))
+#what is their peak timing of abundance each year?
+ecomon_gom$jd <- yday(ecomon_gom$date)
+
+ecomon_gom <- ecomon_gom %>% pivot_longer(cols = ctyp_10m2:lopame_100m3, names_to = "spp", values_to = "abd")
+
+ecomon_ct <- ecomon_gom %>% mutate(mx = month_proxy*abd)
+
+ecomon_ct <- ecomon_ct %>% ungroup %>% group_by(year, spp) %>% mutate(ct = (sum(mx))/(sum(abd)))
+
+ecomon_ct <- ecomon_ct %>% select(year, spp, ct) %>% unique()
+
+
+
+ecomon_ct %>% ggplot(aes(x = year, y = ct)) + geom_point() + labs(y = "Spring central tendency of abundance (April 1 - May 31)", main = "Gulf of Maine")+ geom_smooth(aes(x = year, y = ct), method = "loess", colour = "blue")
+
+ecomon_ct <- ecomon_ct %>% pivot_wider(names_from = spp, values_from = ct)
+
+```
+
+```{r}
+whale_ct <- left_join(whale_ct, ecomon_ct, by = c("year"))
+
+
+```
+
+```{r}
+ggplot(data = whale_ct ,aes(x = ct_day, y = ctyp_10m2)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = ct_day, y = ctyp_10m2), method = "glm", colour = "blue")+
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point()
+
+
+```
+
+
+
