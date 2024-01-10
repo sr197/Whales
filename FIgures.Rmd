@@ -424,15 +424,12 @@ maybe start by only looking at ones that are changing their distributions?
 ```{r}
 sum$region_season <- paste(sum$Region, sum$season, sep = "_")
 region_seasons <- unique(sum$region_season)
-
-sum <- sum %>% filter(region_season %in% c("GB_winter", "GOM_spring", "GB_summer", "SNE_summer"))
-
 ```
 
 ###2.3.1 GLM
 ```{r}
-
-xnames <- colnames(sum[8:ncol(sum)])
+x <- sum %>% select(AMPHIPODA_stomach:mesopelagic_fish_trawl) %>% ungroup()
+xnames <- colnames(x)
 xnames <- c(xnames, "year_2")
 res_glm <- data.frame(matrix(ncol=5, nrow=1))
 colnames(res_glm) <- c("names", "deviance", "p_val", "region", "coef")
@@ -447,9 +444,9 @@ colnames(res_glm_mid) <- c("names", "deviance", "p_val", "region", "coef")
     region <- region_seasons[b]
     use <- sum %>% filter(region_season %in% region)
   for (i in 1:length(xnames)) { #for each species in spec_list
-  tryCatch({ fit <- lm(as.formula(paste("AbdPerArea ~", xnames[i])), data=use)
+  tryCatch({ fit <- glm(as.formula(paste("AbdPerArea ~", xnames[i])), data=use)
   p_val <- summary(fit)$coefficients[2,4]
-  dev <- summary(fit)$adj.r.squared
+  dev <- 1 - (summary(fit)$deviance/summary(fit)$null.deviance)
   res_glm_mid[i,1] <- xnames[i]
   res_glm_mid[i,2] <- dev
   res_glm_mid[i,3] <- p_val
@@ -1372,7 +1369,7 @@ centroid_glm$cat <- ifelse(centroid_glm$names %in% c("sfc_temp", "sfc_salt", "bt
 centroid_glm %>% filter(names != "year") %>% ggplot(aes(y = deviance, x = cat, colour = cat)) + geom_boxplot() + stat_compare_means(method = "wilcox")
 ```
 
-##3.4 itming 
+##3.4 timing 
 Timing of peak abundance in GOM 
 only use consistently sampled spatial area - find mean_ct of their abundance - is it earlier or later? 
 ```{r}
@@ -1482,7 +1479,7 @@ densb <- ggplot(data = weighted_centroids_hump,aes(x = year, y = stellwagen_cent
 
 densc <- changing_area %>% filter(metric == "density") %>% ggplot(aes(x = year, y = density*100000, colour = protected_area)) + geom_line() +
   stat_poly_line() +
-  stat_poly_eq(use_label(c("p", "R2"))) + geom_point() + theme_Publication + labs(y = expression("humpback denisty as individuals/100 km" ^2))+ scale_colour_manual(values = c("blue", "red"), labels = c("Great South Channel", "Stellwagen Bank")) + theme(legend.position=c(.42,.91))+
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point() + theme_Publication + labs(y = expression("humpback denisty as individuals/100 km" ^2))+ scale_colour_manual(values = c("blue", "red"), labels = c("Great South Channel", "Stellwagen Bank")) + theme(legend.position=c(.52,.91))+
   labs(color=NULL) 
 densc
 
@@ -1507,7 +1504,7 @@ areaa
 
 
 
-areab <- whale_ct %>% ggplot(aes(x = year, y = ct)) + geom_point() + labs(y = "Central tendency of abundance (two-week period)", main = "Gulf of Maine")+ geom_smooth(aes(x = year, y = ct), method = "glm", colour = "blue") + theme_Publication
+areab <- whale_ct %>% ggplot(aes(x = year, y = ct)) + geom_point() + labs(y = "Central tendency of abundance (two-week period)", main = "Gulf of Maine")+ geom_smooth(aes(x = year, y = ct), method = "glm", colour = "blue") +  stat_poly_eq(use_label(c("p", "R2"))) + theme_Publication
 time1
 
 
