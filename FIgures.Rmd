@@ -319,6 +319,8 @@ ggplot(data = whale_mon, aes(x = year_2+1995, y = AbdPerArea*100000)) + geom_poi
   scale_color_identity() 
 
 
+ggsave(filename = "figures/manuscript/all_abundance.png", plot=last_plot(), width = 25, height=10, units=c("cm"), dpi=500)
+
 ```
 ##2.2 prey 
 indices of abundance for stomach content ecomon, trawl data - added categories to summarize at Julia's level 
@@ -723,7 +725,6 @@ p2 <- ggplot(data = weighted_centroids_hump,aes(x = year, y = stellwagen_center)
 
 p3 <- p1 + p2+ plot_annotation(tag_levels = 'A')
 p3
-ggsave(filename = "figures/Figure3.png", plot=p3, width = 25, height=10, units=c("cm"), dpi=500)
 ```
 ###3.1.3 Area occupied 
 - has their total area occupied changed? (grid cells they were present in/area surveyed)
@@ -1438,7 +1439,7 @@ whale_ct <- whale_ct %>% select(year, ct, avg_abd, sum_abd) %>% unique()
 
 whale_ct %>% ggplot(aes(x = year, y = ct)) + geom_point() + labs(y = "Central tendency of abundance (two-week period)", main = "Gulf of Maine")+ geom_smooth(aes(x = year, y = ct), method = "loess", colour = "blue")
 ```
-#4. GOM PLOT 
+#4. Figures
 
 make one big plot of the gulf of maine 
 
@@ -1462,52 +1463,67 @@ abd2
 
 ##4.2 distribution 
 ```{r}
-dens1 <- ggplot(data = world) + geom_sf()+ geom_point(data =  weighted_centroids_hump, aes(x = X, y = Y, colour = year)) + geom_sf(data=stellwagen, fill = NA, colour = "red")+ geom_sf(data = GSC_pots,colour = "blue", fill = NA) + geom_sf(data = GSC_dredge, colour = "black", fill = NA) +
-    coord_sf(xlim=c(-75, -65), ylim=c(40,45), expand = TRUE) + theme_Publication+ theme(panel.background = element_rect(fill = "white", colour = "black")) + theme(legend.position=c(.8,.3)) 
+densa <- ggplot(data = world) + geom_sf()+ geom_point(data =  weighted_centroids_hump, aes(x = X, y = Y, colour = year)) + geom_sf(data=stellwagen, fill = NA, colour = "red")+ geom_sf(data = GSC_pots,colour = "blue", fill = NA) + geom_sf(data = GSC_dredge, colour = "black", fill = NA) +
+    coord_sf(xlim=c(-75, -65), ylim=c(40,45), expand = TRUE) + theme_Publication+ theme(panel.background = element_rect(fill = "white", colour = "black")) + theme(legend.position=c(.8,.3)) +
+  scale_colour_gradient(low = "yellow", high = "red", na.value = NA) +
+  geom_sf_text(data = stellwagen, aes(label = "Stellwagen Bank"), size = 3, colour = "red",
+    nudge_x = 0.4, nudge_y = 0.52)+
+  geom_sf_text(data = GSC_pots, aes(label = "Great South Channel"), size = 3, colour = "blue",
+    nudge_x = 0.1, nudge_y = -0.7)
 
 
-dens2 <- ggplot(data = weighted_centroids_hump,aes(x = year, y = stellwagen_center)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = year, y = stellwagen_center), method = "glm", colour = "blue")+
+
+
+
+
+densb <- ggplot(data = weighted_centroids_hump,aes(x = year, y = stellwagen_center)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) + geom_smooth(aes(x = year, y = stellwagen_center), method = "glm", colour = "blue")+
   stat_poly_line() +
   stat_poly_eq(use_label(c("p", "R2"))) + geom_point() + theme_Publication + labs(y = "distance to stellwagen")
 
+densc <- changing_area %>% filter(metric == "density") %>% ggplot(aes(x = year, y = density*100000, colour = protected_area)) + geom_line() +
+  stat_poly_line() +
+  stat_poly_eq(use_label(c("p", "R2"))) + geom_point() + theme_Publication + labs(y = expression("humpback denisty as individuals/100 km" ^2))+ scale_colour_manual(values = c("blue", "red"), labels = c("Great South Channel", "Stellwagen Bank")) + theme(legend.position=c(.42,.91))+
+  labs(color=NULL) 
+densc
 
-
-dens3 <- centroid_glm %>% top_n(deviance,n = 15) %>% 
+densd <- centroid_glm %>% top_n(deviance,n = 15) %>% 
   mutate(names = fct_reorder(names, deviance)) %>%
   ggplot(aes(x=names, y=deviance, fill = direction)) +
     geom_bar(stat="identity", width=.4) +
-    coord_flip() + labs(y = "deviance ",x = element_blank())+ theme_Publication + scale_fill_manual(values = c("light blue", "orange")) 
-dens1
-dens2
-dens3
+    coord_flip() + labs(y = "deviance ",x = element_blank())+ theme_Publication + scale_fill_manual(values = c("light blue", "orange")) + theme(legend.position=c(.8,.3)) 
 
-area1 <- ggplot(data = occ ,aes(x = year, y = perc_occupied)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) +
+
+densa
+densb
+densc
+densd
+
+
+
+areaa <- ggplot(data = occ ,aes(x = year, y = perc_occupied)) + geom_point() + theme(panel.background = element_rect(fill = "white", colour = "black")) +
   stat_poly_line() +
   stat_poly_eq(use_label(c("p", "R2"))) + geom_point() + theme_Publication + labs(y = "% of surveyed occupied")
-area1
+areaa
 
-area2 <- changing_area %>% filter(metric == "density") %>% ggplot(aes(x = year, y = density, colour = protected_area)) + geom_line() +
-  stat_poly_line() +
-  stat_poly_eq(use_label(c("p", "R2"))) + geom_point() + theme_Publication + labs(y = "density ")
-area2
 
-time1 <- whale_ct %>% ggplot(aes(x = year, y = ct)) + geom_point() + labs(y = "Central tendency of abundance (two-week period)", main = "Gulf of Maine")+ geom_smooth(aes(x = year, y = ct), method = "glm", colour = "blue") + theme_Publication
+
+areab <- whale_ct %>% ggplot(aes(x = year, y = ct)) + geom_point() + labs(y = "Central tendency of abundance (two-week period)", main = "Gulf of Maine")+ geom_smooth(aes(x = year, y = ct), method = "glm", colour = "blue") + theme_Publication
 time1
-```
 
-```{r}
+
+
 p_abd <- abd1 + abd2 + plot_annotation(tag_levels = 'A')
 p_abd
 
 ggsave(filename = "figures/manuscript/abundance.png", plot=last_plot(), width = 25, height=15, units=c("cm"), dpi=500)
 
-p_dist <- (dens1 + area2)/ (dens2 + dens3) + plot_annotation(tag_levels = 'A')
+p_dist <- (densa + densb)/ (densc + densd) + plot_annotation(tag_levels = 'A')
 p_dist
 
 ggsave(filename = "figures/manuscript/distribution.png", plot=last_plot(), width = 35, height=25, units=c("cm"), dpi=500)
 
 
-p_non <- time1 + area1
+p_non <- areaa + areab
 p_non
 
 ggsave(filename = "figures/manuscript/timing_area.png", plot=last_plot(), width = 25, height=15, units=c("cm"), dpi=500)
